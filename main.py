@@ -45,12 +45,13 @@ class stock:
 
 
 class exchange:
-    def __init__(self, on_fill=None, on_cancel=None):
+    def __init__(self, on_fill=None, on_cancel=None, max_matches_per_tick: int | None = None):
         self.stocks = {}  # {"AAPL": 100.0}
         self.bids = []  # sorted by (-price, id)
         self.asks = []  # sorted by (price, id)
         self._bid_keys = []
         self._ask_keys = []
+        self.active_market_orders = []  # large market orders filling dynamically across ticks
         self.transactions = []  # recent transactions (bounded by MAX_TRANSACTIONS)
         self.total_tx_count = 0
         self.history = {}  # {"AAPL": [(time, price), ...]}
@@ -58,6 +59,7 @@ class exchange:
         self._tx_id = 1
         self.on_fill = on_fill
         self.on_cancel = on_cancel
+        self.max_matches_per_tick = max_matches_per_tick
 
     def _release_order_escrow(self, order):
         player = order.get("player")
@@ -103,9 +105,16 @@ class exchange:
         ask["filled_qty"] = ask.get("filled_qty", 0) + qty
         bid["fill_notional"] = bid.get("fill_notional", 0.0) + trade_price * qty
         ask["fill_notional"] = ask.get("fill_notional", 0.0) + trade_price * qty
-        fill_entry = (round(t, 4), round(trade_price, 2), qty)
-        bid.setdefault("fills", []).append(fill_entry)
-        ask.setdefault("fills", []).append(fill_entry)
+        p_key = round(trade_price, 2)
+        t_val = round(t, 4)
+        for ord_obj in (bid, ask):
+            fbp = ord_obj.setdefault("fills_by_price", {})
+            prev = fbp.get(p_key)
+            if prev is None:
+                fbp[p_key] = [t_val, qty]
+            else:
+                prev[0] = t_val
+                prev[1] += qty
         s.price = round(trade_price, 4)
 
         buyer = bid.get("player")
@@ -225,11 +234,16 @@ class exchange:
         self._match(s, t)
         return order
 
-    def _match(self, s, t=0.0):
+    def _match(self, s, t=0.0, max_matches: int | None = None):
         if s.name not in self.history:
             self.history[s.name] = [(0.0, s.price)]
 
+        limit = self.max_matches_per_tick if max_matches is None else max_matches
+        matches = 0
+
         while self.bids and self.asks and self.bids[0]["price"] >= self.asks[0]["price"]:
+            if limit is not None and matches >= limit:
+                break
             bid = self.bids[0]
             ask = self.asks[0]
 
@@ -248,6 +262,7 @@ class exchange:
             trade_price = ask["price"] if ask["id"] < bid["id"] else bid["price"]
 
             self._record_fill(s, bid, ask, qty, trade_price, t)
+            matches += 1
 
             if bid["amount"] == 0:
                 self._release_order_escrow(bid)
@@ -258,10 +273,89 @@ class exchange:
 
         self.stocks[s.name] = round(s.price, 2)
 
+    def _step_market_order(self, s, temp_order: dict, t: float, max_matches: int | None = None) -> tuple[bool, str | None]:
+        """Execute up to max_matches fills for a market order. Returns (done, stop_reason)."""
+        side = temp_order["side"]
+        player = temp_order.get("player")
+        matches = 0
+
+        if side == "buy":
+            while temp_order["amount"] > 0 and self.asks:
+                if max_matches is not None and matches >= max_matches:
+                    return False, None
+                ask = self.asks[0]
+                if player is not None and ask["player"] is player:
+                    cancelled = self._pop_ask(0)
+                    self._release_order_escrow(cancelled)
+                    if self.on_cancel:
+                        self.on_cancel(cancelled)
+                    continue
+                trade_price = ask["price"]
+                max_qty = min(temp_order["amount"], ask["amount"])
+                if player is not None:
+                    spendable = player.spendable_for_buy(s, trade_price)
+                    affordable = int(spendable // trade_price)
+                    if affordable <= 0:
+                        return True, "Insufficient available cash."
+                    max_qty = min(max_qty, affordable)
+                self._record_fill(s, temp_order, ask, max_qty, trade_price, t)
+                matches += 1
+                if ask["amount"] == 0:
+                    self._release_order_escrow(ask)
+                    self._pop_ask(0)
+            return True, None
+
+        if side == "sell":
+            while temp_order["amount"] > 0 and self.bids:
+                if max_matches is not None and matches >= max_matches:
+                    return False, None
+                bid = self.bids[0]
+                if player is not None and bid["player"] is player:
+                    cancelled = self._pop_bid(0)
+                    self._release_order_escrow(cancelled)
+                    if self.on_cancel:
+                        self.on_cancel(cancelled)
+                    continue
+                trade_price = bid["price"]
+                max_qty = min(temp_order["amount"], bid["amount"])
+                if player is not None:
+                    sellable, reason = player.max_sellable_qty(s, trade_price, max_qty)
+                    if sellable <= 0:
+                        return True, reason
+                    max_qty = min(max_qty, sellable)
+                self._record_fill(s, bid, temp_order, max_qty, trade_price, t)
+                matches += 1
+                if bid["amount"] == 0:
+                    self._release_order_escrow(bid)
+                    self._pop_bid(0)
+            return True, None
+
+        return True, "Invalid order side."
+
+    def process_pending(self, s, t: float):
+        """Advance any chunked market orders and remaining crossed limit orders."""
+        if self.active_market_orders:
+            still_active = []
+            for m_ord in self.active_market_orders:
+                done, _ = self._step_market_order(s, m_ord, t, max_matches=self.max_matches_per_tick)
+                if not done and m_ord["amount"] > 0:
+                    still_active.append(m_ord)
+                elif m_ord["amount"] > 0 and self.on_cancel:
+                    # Exhausted liquidity or buying power before full fill
+                    self.on_cancel(m_ord)
+            self.active_market_orders = still_active
+        self._match(s, t)
+
     def submitMarketOrder(self, s, side: str, amount: int, player=None, t=0.0, db_order_id=None):
         amount = int(amount)
         if amount <= 0:
             return False, "Amount must be positive.", None
+        if side not in ("buy", "sell"):
+            return False, "Invalid order side.", None
+        if side == "buy" and not self.asks:
+            return False, "No asks available in order book.", None
+        if side == "sell" and not self.bids:
+            return False, "No bids available in order book.", None
         if s.name not in self.history:
             self.history[s.name] = [(0.0, s.price)]
 
@@ -280,77 +374,38 @@ class exchange:
             "reserved_shares": 0,
             "reserved_margin": 0.0,
             "db_order_id": db_order_id,
+            "is_active_market": False,
         }
         self._order_id += 1
 
-        if side == "buy":
-            if not self.asks:
-                return False, "No asks available in order book.", None
-            stop_reason = None
-            while temp_order["amount"] > 0 and self.asks:
-                ask = self.asks[0]
-                if player is not None and ask["player"] is player:
-                    cancelled = self._pop_ask(0)
-                    self._release_order_escrow(cancelled)
-                    if self.on_cancel:
-                        self.on_cancel(cancelled)
-                    continue
-                trade_price = ask["price"]
-                max_qty = min(temp_order["amount"], ask["amount"])
-                if player is not None:
-                    spendable = player.spendable_for_buy(s, trade_price)
-                    affordable = int(spendable // trade_price)
-                    if affordable <= 0:
-                        stop_reason = "Insufficient available cash."
-                        break
-                    max_qty = min(max_qty, affordable)
-                self._record_fill(s, temp_order, ask, max_qty, trade_price, t)
-                if ask["amount"] == 0:
-                    self._release_order_escrow(ask)
-                    self._pop_ask(0)
+        done, stop_reason = self._step_market_order(s, temp_order, t, max_matches=self.max_matches_per_tick)
+        filled = temp_order["filled_qty"]
+        if filled == 0 and done:
+            default_err = f"No liquidity available to fill market {side}."
+            return False, stop_reason or default_err, None
 
-            filled = temp_order["filled_qty"]
-            if filled == 0:
-                return False, stop_reason or "No liquidity available to fill market buy.", None
-            avg_p = temp_order["fill_notional"] / filled
-            msg = f"Market buy filled {filled}/{amount} @ ${avg_p:.2f}." if filled < amount else f"Market buy filled {filled} @ ${avg_p:.2f}."
+        avg_p = temp_order["fill_notional"] / filled if filled > 0 else s.price
+        if not done and temp_order["amount"] > 0:
+            temp_order["is_active_market"] = True
+            self.active_market_orders.append(temp_order)
+            msg = f"Market {side} filling dynamically ({filled}/{amount} filled so far @ ${avg_p:.2f})."
             return True, msg, temp_order
 
-        if side == "sell":
-            if not self.bids:
-                return False, "No bids available in order book.", None
-            stop_reason = None
-            while temp_order["amount"] > 0 and self.bids:
-                bid = self.bids[0]
-                if player is not None and bid["player"] is player:
-                    cancelled = self._pop_bid(0)
-                    self._release_order_escrow(cancelled)
-                    if self.on_cancel:
-                        self.on_cancel(cancelled)
-                    continue
-                trade_price = bid["price"]
-                max_qty = min(temp_order["amount"], bid["amount"])
-                if player is not None:
-                    sellable, reason = player.max_sellable_qty(s, trade_price, max_qty)
-                    if sellable <= 0:
-                        stop_reason = reason
-                        break
-                    max_qty = min(max_qty, sellable)
-                self._record_fill(s, bid, temp_order, max_qty, trade_price, t)
-                if bid["amount"] == 0:
-                    self._release_order_escrow(bid)
-                    self._pop_bid(0)
-
-            filled = temp_order["filled_qty"]
-            if filled == 0:
-                return False, stop_reason or "No liquidity available to fill market sell.", None
-            avg_p = temp_order["fill_notional"] / filled
-            msg = f"Market sell filled {filled}/{amount} @ ${avg_p:.2f}." if filled < amount else f"Market sell filled {filled} @ ${avg_p:.2f}."
-            return True, msg, temp_order
-
-        return False, "Invalid order side.", None
+        msg = (
+            f"Market {side} filled {filled}/{amount} @ ${avg_p:.2f}."
+            if filled < amount
+            else f"Market {side} filled {filled} @ ${avg_p:.2f}."
+        )
+        return True, msg, temp_order
 
     def cancel_order(self, order_id: int, player=None):
+        for i, order in enumerate(self.active_market_orders):
+            if order["id"] == order_id and (player is None or order["player"] is player):
+                removed = self.active_market_orders.pop(i)
+                removed["is_active_market"] = False
+                if self.on_cancel:
+                    self.on_cancel(removed)
+                return True, removed
         for book, keys in ((self.bids, self._bid_keys), (self.asks, self._ask_keys)):
             for i, order in enumerate(book):
                 if order["id"] == order_id and (player is None or order["player"] is player):
@@ -365,6 +420,12 @@ class exchange:
     def cancel_player_orders(self, players_set, side=None):
         if not isinstance(players_set, (set, frozenset)):
             players_set = {players_set}
+        for i in range(len(self.active_market_orders) - 1, -1, -1):
+            if self.active_market_orders[i]["player"] in players_set and (side is None or self.active_market_orders[i]["side"] == side):
+                removed = self.active_market_orders.pop(i)
+                removed["is_active_market"] = False
+                if self.on_cancel:
+                    self.on_cancel(removed)
         targets = (
             [(self.bids, self._bid_keys)]
             if side == "buy"

@@ -18,13 +18,11 @@ import uvicorn
 
 from db import (
     create_user,
+    flush_db_batch,
     get_user,
     get_user_orders,
     init_db,
-    record_fill,
     record_order,
-    record_order_cancel,
-    record_order_fill,
     save_user_state,
 )
 from main import CFG, Player, exchange, stock
@@ -79,6 +77,7 @@ class LiveSimulation:
 
     def __init__(self, n=None, duration=None):
         self.lock = threading.RLock()
+        self._db_lock = threading.Lock()
         self.initial_n = _SIM_CFG.get("initial_players", 50) if n is None else n
         self.n = self.initial_n
         self.duration = _SIM_CFG.get("duration", None) if duration is None else duration
@@ -90,8 +89,37 @@ class LiveSimulation:
         self._heap_seq = 0
         self._candle_buckets: dict[int, dict[int, dict]] = {}
         self._last_close_by_iv: dict[int, dict[int, float]] = {}
+        self._dirty_users: dict[int, tuple[float, int, float]] = {}
+        self._dirty_orders: dict[int, tuple[int, float, str, float]] = {}
+        self._pending_fills: dict[tuple[int, float], list] = {}
+        self._pending_cancels: dict[int, float] = {}
         init_db()
         self.reset()
+
+    def _flush_db(self):
+        with self.lock:
+            if not (self._dirty_users or self._dirty_orders or self._pending_fills or self._pending_cancels):
+                return
+            user_updates = [
+                (round(c, 2), int(sh), round(cb, 2), uid)
+                for uid, (c, sh, cb) in self._dirty_users.items()
+            ]
+            order_updates = [
+                (int(fa), round(ep, 4), st, round(ub, 2), oid)
+                for oid, (fa, ep, st, ub) in self._dirty_orders.items()
+            ]
+            fill_deltas = [
+                (oid, row[0], row[1], row[2], row[3], price, row[4], row[5])
+                for (oid, price), row in self._pending_fills.items()
+            ]
+            cancels = list(self._pending_cancels.items())
+            self._dirty_users.clear()
+            self._dirty_orders.clear()
+            self._pending_fills.clear()
+            self._pending_cancels.clear()
+
+        with self._db_lock:
+            flush_db_batch(user_updates, order_updates, fill_deltas, cancels)
 
     def _schedule_bot(self, bot: Player, base_t: float):
         ev_t = base_t + random.expovariate(max(bot.epsilon, 0.05) * 2)
@@ -131,40 +159,44 @@ class LiveSimulation:
                 c["close"] = price
                 c["volume"] += qty
 
-        # Persist fills & updated user balances to SQLite for manual players
+        # Queue fills & updated user balances in memory; flushed in a single batched DB transaction
         for order in (bid, ask):
             player = order.get("player")
             uid = self._player_to_uid.get(player) if player is not None else None
             if uid is not None:
                 sess = self.user_sessions.get(uid)
                 if sess:
-                    save_user_state(
-                        uid,
-                        cash=player.cash,
-                        shares=player.get_qty(self.stock),
-                        cost_basis=sess["cost_basis"],
+                    self._dirty_users[uid] = (
+                        player.cash,
+                        player.get_qty(self.stock),
+                        sess["cost_basis"],
                     )
                 db_oid = order.get("db_order_id")
                 if db_oid is not None and order["filled_qty"] > 0:
                     avg_exec = order["fill_notional"] / order["filled_qty"]
                     status = "filled" if order["amount"] == 0 else "partial"
-                    record_order_fill(
-                        db_oid,
-                        filled_amount=order["filled_qty"],
-                        exec_price=avg_exec,
-                        status=status,
-                        user_balance=player.cash,
+                    self._dirty_orders[db_oid] = (
+                        order["filled_qty"],
+                        avg_exec,
+                        status,
+                        player.cash,
                     )
-                    record_fill(
-                        order_id=db_oid,
-                        userid=uid,
-                        stock_name=self.stock.name,
-                        side=order["side"],
-                        time=tx["time"],
-                        fill_price=tx["price"],
-                        fill_qty=tx["qty"],
-                        user_balance=player.cash,
-                    )
+                    p_key = round(tx["price"], 2)
+                    fkey = (db_oid, p_key)
+                    prev = self._pending_fills.get(fkey)
+                    if prev is None:
+                        self._pending_fills[fkey] = [
+                            uid,
+                            self.stock.name,
+                            order["side"],
+                            tx["time"],
+                            int(tx["qty"]),
+                            round(player.cash, 2),
+                        ]
+                    else:
+                        prev[3] = tx["time"]
+                        prev[4] += int(tx["qty"])
+                        prev[5] = round(player.cash, 2)
                     if sess:
                         sess["orders_version"] = sess.get("orders_version", 1) + 1
 
@@ -172,7 +204,7 @@ class LiveSimulation:
         player = order.get("player")
         db_oid = order.get("db_order_id")
         if player is not None and db_oid is not None:
-            record_order_cancel(db_oid, user_balance=player.cash)
+            self._pending_cancels[db_oid] = player.cash
             uid = self._player_to_uid.get(player)
             if uid is not None and uid in self.user_sessions:
                 self.user_sessions[uid]["orders_version"] = self.user_sessions[uid].get("orders_version", 1) + 1
@@ -180,13 +212,17 @@ class LiveSimulation:
     def reset(self):
         with self.lock:
             if hasattr(self, "market") and self.market is not None:
-                for resting in list(self.market.bids) + list(self.market.asks):
+                for resting in list(self.market.bids) + list(self.market.asks) + list(self.market.active_market_orders):
                     if resting.get("db_order_id") is not None:
                         self._on_market_cancel(resting)
             self.n = self.initial_n
             bot_shares = _BOT_CFG.get("initial_shares", 50)
             player_shares = _PLAYER_CFG.get("initial_shares", 0)
-            self.market = exchange(on_fill=self._on_market_fill, on_cancel=self._on_market_cancel)
+            self.market = exchange(
+                on_fill=self._on_market_fill,
+                on_cancel=self._on_market_cancel,
+                max_matches_per_tick=40,
+            )
             self.stock = stock()
             self.players = [
                 Player(id=i + 1, stock=[{"name": self.stock.name, "qty": bot_shares}], is_bot=True)
@@ -218,10 +254,11 @@ class LiveSimulation:
                 sess["player"] = p
                 sess["cost_basis"] = cost_basis
                 self._player_to_uid[p] = uid
-                save_user_state(uid, cash=init_cash, shares=player_shares, cost_basis=cost_basis)
+                self._dirty_users[uid] = (init_cash, player_shares, cost_basis)
 
             total_issued = self.n * bot_shares + len(self.user_sessions) * player_shares
             self.stock.numberOfStock = max(self.stock.numberOfStock, total_issued)
+        self._flush_db()
 
     def reset_players(self):
         with self.lock:
@@ -263,10 +300,14 @@ class LiveSimulation:
                 if p._active:
                     self._schedule_bot(p, ev_t)
 
+            # Dynamically advance any large chunked market or crossed limit orders
+            self.market.process_pending(self.stock, target_t)
+
             self.t = target_t
             if self.duration is not None and self.t >= self.duration:
                 self.market.history[self.stock.name].append((self.duration, self.stock.price))
                 self.running = False
+        self._flush_db()
 
     def login_or_restore_user(self, username: str, initial_cash: float) -> dict:
         with self.lock:
@@ -360,86 +401,94 @@ class LiveSimulation:
                 if not ok or order is None:
                     return False, msg
                 filled = order["filled_qty"]
-                avg_exec = round(order["fill_notional"] / filled, 4) if filled > 0 else 0.0
-                status = "filled" if filled == amount else "partial_cancelled"
-                db_oid = record_order(
-                    userid=user_id,
-                    stock_name=self.stock.name,
-                    side=side,
-                    time=round(self.t, 4),
-                    order_price=round(avg_exec, 2),
-                    order_amount=amount,
-                    user_balance=round(player.cash, 2),
-                    order_type="market",
-                    filled_amount=filled,
-                    exec_price=avg_exec,
-                    status=status,
-                )
-                for ft, fp, fq in order.get("fills", []):
-                    record_fill(
-                        order_id=db_oid,
+                avg_exec = round(order["fill_notional"] / filled, 4) if filled > 0 else round(self.stock.price, 4)
+                is_working = bool(order.get("is_active_market"))
+                status = "partial" if is_working else ("filled" if filled == amount else "partial_cancelled")
+                with self._db_lock:
+                    db_oid = record_order(
                         userid=user_id,
                         stock_name=self.stock.name,
                         side=side,
-                        time=ft,
-                        fill_price=fp,
-                        fill_qty=fq,
-                        user_balance=player.cash,
+                        time=round(self.t, 4),
+                        order_price=round(avg_exec, 2),
+                        order_amount=amount,
+                        user_balance=round(player.cash, 2),
+                        order_type="market",
+                        filled_amount=filled,
+                        exec_price=avg_exec,
+                        status=status,
                     )
-                save_user_state(
-                    user_id,
-                    cash=player.cash,
-                    shares=player.get_qty(self.stock),
-                    cost_basis=sess["cost_basis"],
+                order["db_order_id"] = db_oid
+                for fp, (ft, fq) in order.get("fills_by_price", {}).items():
+                    self._pending_fills[(db_oid, fp)] = [
+                        user_id,
+                        self.stock.name,
+                        side,
+                        ft,
+                        int(fq),
+                        round(player.cash, 2),
+                    ]
+                self._dirty_users[user_id] = (
+                    player.cash,
+                    player.get_qty(self.stock),
+                    sess["cost_basis"],
                 )
                 sess["orders_version"] = sess.get("orders_version", 1) + 1
-                return True, msg
-
-            # Limit order
-            if price is None or price <= 0:
-                return False, "Price must be positive for limit orders."
-            price = round(float(price), 2)
-
-            if side == "buy":
-                ok, msg, order = player.buy(self.market, self.stock, price, amount, t=self.t)
             else:
-                ok, msg, order = player.sell(self.market, self.stock, price, amount, t=self.t)
+                # Limit order
+                if price is None or price <= 0:
+                    return False, "Price must be positive for limit orders."
+                price = round(float(price), 2)
 
-            if not ok or order is None:
-                return False, msg
+                if side == "buy":
+                    ok, msg, order = player.buy(self.market, self.stock, price, amount, t=self.t)
+                else:
+                    ok, msg, order = player.sell(self.market, self.stock, price, amount, t=self.t)
 
-            filled = order["filled_qty"]
-            avg_exec = round(order["fill_notional"] / filled, 4) if filled > 0 else 0.0
-            status = "filled" if order["amount"] == 0 else ("partial" if filled > 0 else "open")
-            db_oid = record_order(
-                userid=user_id,
-                stock_name=self.stock.name,
-                side=side,
-                time=round(self.t, 4),
-                order_price=price,
-                order_amount=amount,
-                user_balance=round(player.cash, 2),
-                order_type="limit",
-                filled_amount=filled,
-                exec_price=avg_exec,
-                status=status,
-            )
-            order["db_order_id"] = db_oid
-            for ft, fp, fq in order.get("fills", []):
-                record_fill(
-                    order_id=db_oid,
-                    userid=user_id,
-                    stock_name=self.stock.name,
-                    side=side,
-                    time=ft,
-                    fill_price=fp,
-                    fill_qty=fq,
-                    user_balance=player.cash,
+                if not ok or order is None:
+                    return False, msg
+
+                filled = order["filled_qty"]
+                avg_exec = round(order["fill_notional"] / filled, 4) if filled > 0 else 0.0
+                status = "filled" if order["amount"] == 0 else ("partial" if filled > 0 else "open")
+                with self._db_lock:
+                    db_oid = record_order(
+                        userid=user_id,
+                        stock_name=self.stock.name,
+                        side=side,
+                        time=round(self.t, 4),
+                        order_price=price,
+                        order_amount=amount,
+                        user_balance=round(player.cash, 2),
+                        order_type="limit",
+                        filled_amount=filled,
+                        exec_price=avg_exec,
+                        status=status,
+                    )
+                order["db_order_id"] = db_oid
+                for fp, (ft, fq) in order.get("fills_by_price", {}).items():
+                    self._pending_fills[(db_oid, fp)] = [
+                        user_id,
+                        self.stock.name,
+                        side,
+                        ft,
+                        int(fq),
+                        round(player.cash, 2),
+                    ]
+                self._dirty_users[user_id] = (
+                    player.cash,
+                    player.get_qty(self.stock),
+                    sess["cost_basis"],
                 )
-            sess["orders_version"] = sess.get("orders_version", 1) + 1
-            if filled > 0:
-                msg = f"{side.capitalize()} limit filled {filled}/{amount} @ ${avg_exec:.2f}."
-            return True, msg
+                sess["orders_version"] = sess.get("orders_version", 1) + 1
+                if filled > 0:
+                    if order["amount"] > 0:
+                        msg = f"{side.capitalize()} limit filling dynamically ({filled}/{amount} filled so far @ ${avg_exec:.2f})."
+                    else:
+                        msg = f"{side.capitalize()} limit filled {filled}/{amount} @ ${avg_exec:.2f}."
+
+        self._flush_db()
+        return True, msg
 
     def deposit(self, user_id: int, amount: float = 1000000.0):
         with self.lock:
@@ -451,13 +500,13 @@ class LiveSimulation:
             player: Player = sess["player"]
             player.cash = round(player.cash + amount, 2)
             sess["cost_basis"] = round(sess["cost_basis"] + amount, 2)
-            save_user_state(
-                user_id,
-                cash=player.cash,
-                shares=player.get_qty(self.stock),
-                cost_basis=sess["cost_basis"],
-            )
-            return True, player.cash, f"Added ${amount:,.0f} to {sess['username']}."
+            cash_now = player.cash
+            shares_now = player.get_qty(self.stock)
+            cb_now = sess["cost_basis"]
+            uname = sess["username"]
+        with self._db_lock:
+            save_user_state(user_id, cash=cash_now, shares=shares_now, cost_basis=cb_now)
+        return True, cash_now, f"Added ${amount:,.0f} to {uname}."
 
     def cancel_order(self, user_id: int, order_id: int):
         with self.lock:
@@ -465,9 +514,10 @@ class LiveSimulation:
             if sess is None:
                 return False, "User session not found."
             ok, _ = self.market.cancel_order(order_id, player=sess["player"])
-            if ok:
-                return True, f"Cancelled order #{order_id}."
-            return False, "Order not found."
+        self._flush_db()
+        if ok:
+            return True, f"Cancelled order #{order_id}."
+        return False, "Order not found."
 
     def add_players(self, count=10, bias="random"):
         with self.lock:
@@ -641,15 +691,28 @@ class LiveSimulation:
 
             your_orders = []
             if manual_player is not None:
-                your_orders = [
-                    {"id": a["id"], "side": "ask", "price": a["price"], "amount": a["amount"]}
-                    for a in self.market.asks
-                    if a["player"] is manual_player
-                ] + [
-                    {"id": b["id"], "side": "bid", "price": b["price"], "amount": b["amount"]}
-                    for b in self.market.bids
-                    if b["player"] is manual_player
-                ]
+                your_orders = (
+                    [
+                        {
+                            "id": m["id"],
+                            "side": m["side"],
+                            "price": round(m["fill_notional"] / m["filled_qty"], 2) if m["filled_qty"] > 0 else round(price, 2),
+                            "amount": m["amount"],
+                        }
+                        for m in self.market.active_market_orders
+                        if m["player"] is manual_player
+                    ]
+                    + [
+                        {"id": a["id"], "side": "ask", "price": a["price"], "amount": a["amount"]}
+                        for a in self.market.asks
+                        if a["player"] is manual_player
+                    ]
+                    + [
+                        {"id": b["id"], "side": "bid", "price": b["price"], "amount": b["amount"]}
+                        for b in self.market.bids
+                        if b["player"] is manual_player
+                    ]
+                )
 
             txs = list(reversed(self.market.transactions[-15:]))
             history = self.market.history.get(self.stock.name, [])

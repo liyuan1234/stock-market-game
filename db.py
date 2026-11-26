@@ -9,8 +9,10 @@ DB_PATH = Path(os.environ.get("MARKET_DB_PATH") or Path(__file__).with_name("mar
 
 @contextmanager
 def get_conn():
-    with closing(sqlite3.connect(DB_PATH)) as conn:
+    with closing(sqlite3.connect(DB_PATH, timeout=30.0)) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         with conn:
             yield conn
 
@@ -88,6 +90,35 @@ def init_db():
             )
             """
         )
+        # Consolidate any legacy duplicate (order_id, fill_price) rows before enforcing unique index
+        conn.execute("UPDATE fills SET fill_price = ROUND(fill_price, 2)")
+        dup_check = conn.execute(
+            "SELECT 1 FROM fills GROUP BY order_id, fill_price HAVING COUNT(*) > 1 LIMIT 1"
+        ).fetchone()
+        if dup_check is not None:
+            conn.execute(
+                """
+                CREATE TEMP TABLE _dedup_fills AS
+                SELECT MIN(id) AS keep_id, order_id, userid, stock_name, side,
+                       MAX(time) AS time, fill_price, SUM(fill_qty) AS fill_qty,
+                       user_balance, MAX(created_at) AS created_at
+                FROM fills
+                GROUP BY order_id, fill_price
+                """
+            )
+            conn.execute("DELETE FROM fills")
+            conn.execute(
+                """
+                INSERT INTO fills (id, order_id, userid, stock_name, side, time, fill_price, fill_qty, user_balance, created_at)
+                SELECT keep_id, order_id, userid, stock_name, side, time, fill_price, fill_qty, user_balance, created_at
+                FROM _dedup_fills
+                """
+            )
+            conn.execute("DROP TABLE _dedup_fills")
+
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_order_price ON fills(order_id, fill_price)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_userid ON fills(userid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_userid ON orders(userid)")
 
 
 def create_user(
@@ -259,9 +290,62 @@ def record_fill(
             """
             INSERT INTO fills (order_id, userid, stock_name, side, time, fill_price, fill_qty, user_balance, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(order_id, fill_price) DO UPDATE SET
+                fill_qty = fills.fill_qty + excluded.fill_qty,
+                time = excluded.time,
+                user_balance = excluded.user_balance
             """,
-            (order_id, userid, stock_name, side, time, round(fill_price, 4), int(fill_qty), round(user_balance, 2), now),
+            (order_id, userid, stock_name, side, time, round(fill_price, 2), int(fill_qty), round(user_balance, 2), now),
         )
+
+
+def flush_db_batch(
+    user_updates: list[tuple],
+    order_updates: list[tuple],
+    fill_deltas: list[tuple],
+    cancels: list[tuple],
+):
+    if not (user_updates or order_updates or fill_deltas or cancels):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        if user_updates:
+            conn.executemany(
+                "UPDATE users SET cash = ?, shares = ?, cost_basis = ? WHERE id = ?",
+                user_updates,
+            )
+        if order_updates:
+            conn.executemany(
+                """
+                UPDATE orders
+                SET filled_amount = ?, exec_price = ?, status = ?, user_balance = ?
+                WHERE id = ?
+                """,
+                order_updates,
+            )
+        if fill_deltas:
+            conn.executemany(
+                """
+                INSERT INTO fills (order_id, userid, stock_name, side, time, fill_price, fill_qty, user_balance, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(order_id, fill_price) DO UPDATE SET
+                    fill_qty = fills.fill_qty + excluded.fill_qty,
+                    time = excluded.time,
+                    user_balance = excluded.user_balance
+                """,
+                [(*row, now) for row in fill_deltas],
+            )
+        for db_order_id, user_balance in cancels:
+            row = conn.execute(
+                "SELECT filled_amount FROM orders WHERE id = ?",
+                (db_order_id,),
+            ).fetchone()
+            if row:
+                status = "partial_cancelled" if row["filled_amount"] > 0 else "cancelled"
+                conn.execute(
+                    "UPDATE orders SET status = ?, user_balance = ? WHERE id = ?",
+                    (status, round(user_balance, 2), db_order_id),
+                )
 
 
 def get_user_orders(userid: int) -> list[dict]:

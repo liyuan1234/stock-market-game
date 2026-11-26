@@ -257,6 +257,38 @@ class TestDashboardSessionAndPersistence(unittest.TestCase):
         txs3 = c_alice.get("/api/my_transactions").json()["transactions"]
         self.assertEqual(txs3[0]["status"], "partial_cancelled")
 
+    def test_large_order_dynamic_chunked_fills_and_price_aggregation(self):
+        c_whale = TestClient(dashboard.app)
+        c_whale.post("/api/login", json={"username": "Whale", "initial_amount": 5000000.0})
+
+        # Seed 120 distinct resting asks across 3 price levels (600 shares total)
+        makers = [
+            Player(id=f"M{i}", cash=10000.0, stock=[{"name": "AAPL", "qty": 20}], is_bot=False)
+            for i in range(120)
+        ]
+        for i, m in enumerate(makers):
+            m.sell(self.sim.market, self.sim.stock, 100.0 + (i % 3) * 0.5, 5, t=0.01)
+
+        # Submitting a 1,000-share limit buy executes the first chunk immediately, then continues dynamically
+        r = c_whale.post("/api/order", json={"side": "buy", "price": 102.0, "amount": 1000, "order_type": "limit"})
+        self.assertEqual(r.status_code, 200)
+        tx0 = c_whale.get("/api/my_transactions").json()["transactions"][0]
+        self.assertEqual(tx0["status"], "partial")
+        self.assertEqual(tx0["filled_amount"], 200)  # 40 matches * 5 shares
+
+        # Advance ticks to dynamically fill the remaining 400 resting shares
+        self.sim.running = True
+        self.sim.step(dt=0.05)
+        tx1 = c_whale.get("/api/my_transactions").json()["transactions"][0]
+        self.assertGreater(tx1["filled_amount"], tx0["filled_amount"])
+
+        self.sim.step(dt=0.05)
+        tx2 = c_whale.get("/api/my_transactions").json()["transactions"][0]
+        self.assertGreaterEqual(tx2["filled_amount"], 600)
+        # Fills at the same price are combined into a single row per distinct price
+        prices = [f["fill_price"] for f in tx2["fills"]]
+        self.assertEqual(len(prices), len(set(prices)))
+
 
 if __name__ == "__main__":
     unittest.main()
