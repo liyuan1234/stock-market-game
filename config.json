@@ -21,7 +21,7 @@
     },
     "simulation": {
         "initial_players": 50,
-        "max_players": 5000,
+        "max_players": 3000,
         "duration": null,
         "tick_dt": 0.05
     },

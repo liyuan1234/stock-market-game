@@ -19,7 +19,7 @@ A limit-order-book stock market simulator with autonomous trading agents and a l
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install matplotlib "fastapi[standard]"
+.venv/bin/pip install -r requirements.txt
 ```
 
 Run the live dashboard (with hot-reload):

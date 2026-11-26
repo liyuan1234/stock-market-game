@@ -64,6 +64,7 @@
         <span class="meta" id="sim-time">Time: 0.0s</span>
         <span class="meta" id="tx-count">Trades: 0</span>
         <span class="meta" id="player-count">Players: 50</span>
+        <span class="meta" id="mcap-info">Shares: 1,000</span>
       </div>
       <div class="controls">
         <button id="toggle-btn" onclick="toggleRun()">Pause</button>
@@ -98,8 +99,8 @@
           <button class="tab-btn" id="tab-candle" onclick="setChartMode('candle')">Candlestick</button>
         </div>
         <div id="candle-tools" style="display:none;gap:6px;align-items:center;">
-          <button class="tab-btn" id="ind-ma" style="display:none;" onclick="toggleIndicator('ma')">MA (5/15)</button>
-          <button class="tab-btn" id="ind-bb" style="display:none;" onclick="toggleIndicator('bb')">BB (10)</button>
+          <button class="tab-btn" id="ind-ma" onclick="toggleIndicator('ma')">MA (5/15)</button>
+          <button class="tab-btn" id="ind-bb" onclick="toggleIndicator('bb')">BB (10)</button>
           <select id="interval-sel" onchange="setIntervalSec(this.value)">
             <option value="1">1s</option>
             <option value="5">5s</option>
@@ -147,7 +148,11 @@
         <canvas id="book-hist"></canvas>
       </div>
       <div class="trade-form">
-        <input type="number" id="ord-price" step="1" value="100.00" placeholder="Price" />
+        <select id="ord-type" onchange="onOrderTypeChange()">
+          <option value="limit" selected>Limit</option>
+          <option value="market">Market</option>
+        </select>
+        <input type="number" id="ord-price" step="0.01" min="0.01" value="100.00" placeholder="Price" />
         <input type="number" id="ord-qty" step="1" min="1" value="5" placeholder="Qty" />
         <button class="btn-buy" onclick="placeOrder('buy')">Buy</button>
         <button class="btn-sell" onclick="placeOrder('sell')">Sell</button>
@@ -184,6 +189,16 @@
     let hoverIdx = -1;
     let smoothMinP = null;
     let smoothMaxP = null;
+    let needsChartDraw = true;
+
+    function escHtml(val) {
+      return String(val ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     function smoothRange(targetMin, targetMax) {
       if (smoothMinP === null || smoothMaxP === null) {
@@ -192,6 +207,9 @@
       } else {
         smoothMinP += (targetMin - smoothMinP) * 0.2;
         smoothMaxP += (targetMax - smoothMaxP) * 0.2;
+        if (Math.abs(targetMin - smoothMinP) > 0.005 || Math.abs(targetMax - smoothMaxP) > 0.005) {
+          needsChartDraw = true;
+        }
       }
       return [smoothMinP, smoothMaxP];
     }
@@ -202,7 +220,16 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      return res.json();
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return { ok: false, message: 'Session expired.' };
+      }
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 422 && !data.message) {
+        const detail = Array.isArray(data.detail) ? data.detail[0]?.msg : data.detail;
+        return { ok: false, message: detail || 'Invalid input.' };
+      }
+      return data;
     }
 
     let showMA = false;
@@ -252,10 +279,30 @@
       postAction('/api/speed', { speed: Number(val) });
     }
 
+    function onOrderTypeChange() {
+      const ordType = document.getElementById('ord-type').value;
+      const priceEl = document.getElementById('ord-price');
+      const isMarket = ordType === 'market';
+      priceEl.disabled = isMarket;
+      priceEl.style.opacity = isMarket ? '0.45' : '1';
+    }
+
     async function placeOrder(side) {
+      const order_type = document.getElementById('ord-type').value;
       const price = Number(document.getElementById('ord-price').value);
-      const amount = Number(document.getElementById('ord-qty').value);
-      const res = await postAction('/api/order', { side, price, amount });
+      const rawQty = Number(document.getElementById('ord-qty').value);
+      if (!Number.isInteger(rawQty) || rawQty <= 0) {
+        document.getElementById('ord-msg').textContent = 'Quantity must be a positive whole number.';
+        return;
+      }
+      if (order_type === 'limit' && (!Number.isFinite(price) || price <= 0)) {
+        document.getElementById('ord-msg').textContent = 'Price must be positive.';
+        return;
+      }
+      const payload = order_type === 'market'
+        ? { side, amount: rawQty, order_type: 'market' }
+        : { side, price, amount: rawQty, order_type: 'limit' };
+      const res = await postAction('/api/order', payload);
       document.getElementById('ord-msg').textContent = res.message || '';
     }
 
@@ -629,6 +676,7 @@
 
     function applyState(data) {
       lastData = data;
+      needsChartDraw = true;
       isRunning = data.running;
       document.getElementById('toggle-btn').textContent = isRunning ? 'Pause' : 'Start';
       document.getElementById('symbol').textContent = data.symbol;
@@ -637,6 +685,13 @@
         data.duration !== null ? `Time: ${data.time.toFixed(1)}s / ${data.duration}s` : `Time: ${data.time.toFixed(1)}s`;
       document.getElementById('tx-count').textContent = `Trades: ${data.tx_count}`;
       document.getElementById('player-count').textContent = `Players: ${data.player_count}`;
+      if (data.total_shares !== undefined) {
+        document.getElementById('mcap-info').textContent =
+          `Shares: ${Number(data.total_shares).toLocaleString()} | MCap: $${Number(data.market_cap || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+      }
+      const canAddBots = data.allow_adding_bots !== false;
+      document.getElementById('add-n').disabled = !canAddBots;
+      document.getElementById('add-bias').disabled = !canAddBots;
       const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
       document.getElementById('players-heading').textContent =
         `Top Players (Total: ${data.player_count} | Bull: ${pb.bull} | Bear: ${pb.bear} | Both: ${pb.both})`;
@@ -654,31 +709,39 @@
       const pnlPct = data.you.pnl_pct;
       const pnlSign = pnl >= 0 ? '+' : '-';
       const pnlCls = pnl >= 0 ? 'bid' : 'ask';
+      const safeUser = escHtml(data.you.username || 'YOU');
+      const availInfo = data.you.reserved_cash > 0
+        ? ` (Avail: $${data.you.available_cash.toFixed(2)}, Locked: $${data.you.reserved_cash.toFixed(2)})`
+        : '';
       document.getElementById('you-info').innerHTML =
-        `${data.you.username || 'YOU'}: $${data.you.cash.toFixed(2)} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
+        `${safeUser}: $${data.you.cash.toFixed(2)}${availInfo} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
 
       setHtml('asks-body', data.asks
-        .map(a => `<tr class="ask"><td>Ask${a.is_you ? ' (YOU)' : ''}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${a.id}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .map(a => `<tr class="ask"><td>Ask${a.is_you ? ' (YOU)' : ''}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${Number(a.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
         .join(''));
       setHtml('bids-body', data.bids
-        .map(b => `<tr class="bid"><td>Bid${b.is_you ? ' (YOU)' : ''}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${b.id}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .map(b => `<tr class="bid"><td>Bid${b.is_you ? ' (YOU)' : ''}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${Number(b.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
         .join(''));
       setHtml('your-orders', data.your_orders.length
         ? 'Open Orders: ' + data.your_orders.map(o =>
-            `${o.side.toUpperCase()} ${o.amount}@${o.price.toFixed(2)} <button data-cancel-id="${o.id}" style="padding:1px 5px;font-size:11px;">Cancel</button>`
+            `${escHtml(o.side.toUpperCase())} ${Number(o.amount)}@${o.price.toFixed(2)} <button data-cancel-id="${Number(o.id)}" style="padding:1px 5px;font-size:11px;">Cancel</button>`
           ).join(' ')
         : '');
-      document.getElementById('tx-body').innerHTML = data.transactions
-        .map(tx => `<tr><td>#${tx.id}</td><td>${tx.time.toFixed(2)}s</td><td>${tx.price.toFixed(2)}</td><td>${tx.qty}</td><td>${tx.buyer_id}</td><td>${tx.seller_id}</td></tr>`)
-        .join('');
-      document.getElementById('lb-body').innerHTML = data.leaderboard
-        .map(p => `<tr><td>P${p.id}</td><td>${p.strategy}</td><td>${p.target.toFixed(2)}</td><td>${p.eps.toFixed(2)}</td><td>${p.cash.toFixed(2)}</td><td>${p.qty}</td><td>${p.value.toFixed(2)}</td></tr>`)
-        .join('');
+      setHtml('tx-body', data.transactions
+        .map(tx => `<tr><td>#${Number(tx.id)}</td><td>${tx.time.toFixed(2)}s</td><td>${tx.price.toFixed(2)}</td><td>${Number(tx.qty)}</td><td>${escHtml(tx.buyer_id)}</td><td>${escHtml(tx.seller_id)}</td></tr>`)
+        .join(''));
+      setHtml('lb-body', data.leaderboard
+        .map(p => `<tr><td>P${escHtml(p.id)}</td><td>${escHtml(p.strategy)}</td><td>${p.target.toFixed(2)}</td><td>${p.eps.toFixed(2)}</td><td>${p.cash.toFixed(2)}</td><td>${Number(p.qty)}</td><td>${p.value.toFixed(2)}</td></tr>`)
+        .join(''));
     }
 
     async function refresh() {
       try {
         const res = await fetch(`/api/state?interval=${candleInterval}`);
+        if (res.status === 401) {
+          window.location.href = '/login';
+          return;
+        }
         applyState(await res.json());
       } catch (e) {}
     }
@@ -688,11 +751,18 @@
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${proto}//${location.host}/ws?interval=${candleInterval}`);
       ws.onmessage = (e) => applyState(JSON.parse(e.data));
-      ws.onclose = () => setTimeout(connectWS, 1000);
+      ws.onclose = (ev) => {
+        if (ev.code === 1008) {
+          window.location.href = '/login';
+          return;
+        }
+        setTimeout(connectWS, 1000);
+      };
     }
 
     function animate() {
-      if (lastData) {
+      if (lastData && needsChartDraw) {
+        needsChartDraw = false;
         renderChart(lastData);
         if (bookMode === 'hist') drawBookHistogram(lastData);
       }
