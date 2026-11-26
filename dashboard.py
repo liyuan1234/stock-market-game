@@ -10,37 +10,64 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
-from main import Player, exchange, stock
+from main import CFG, Player, exchange, stock
+
+_SIM_CFG = CFG.get("simulation", {})
+_PLAYER_CFG = CFG.get("player", {})
+_SERVER_CFG = CFG.get("server", {})
 
 
 class LiveSimulation:
     """Manages a step-by-step live AAPL market simulation."""
 
-    def __init__(self, n=50, duration=None):
+    def __init__(self, n=None, duration=None):
         self.lock = threading.Lock()
-        self.n = n
-        self.duration = duration
+        self.initial_n = _SIM_CFG.get("initial_players", 50) if n is None else n
+        self.n = self.initial_n
+        self.duration = _SIM_CFG.get("duration", None) if duration is None else duration
         self.running = True
         self.speed = 1.0
         self.reset()
 
     def reset(self):
         with self.lock:
+            self.n = self.initial_n
+            init_shares = _PLAYER_CFG.get("initial_shares", 50)
             self.market = exchange()
-            self.stock = stock(name="AAPL", price=100.0, numberOfStock=1000)
+            self.stock = stock()
             self.players = [
-                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": 50}])
+                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": init_shares}])
                 for i in range(self.n)
             ]
             self.manual_player = Player(
-                id="YOU", cash=1000000.0, stock=[{"name": self.stock.name, "qty": 50}]
+                id="YOU", stock=[{"name": self.stock.name, "qty": init_shares}]
             )
-            self.you_cost_basis = self.manual_player.cash + 50 * self.stock.price
+            self.you_cost_basis = self.manual_player.cash + init_shares * self.stock.price
             self.next_times = [
                 random.expovariate(max(p.epsilon, 0.05) * 2) for p in self.players
             ]
             self.t = 0.0
             self.market.history[self.stock.name] = [(0.0, self.stock.price)]
+
+    def reset_players(self):
+        with self.lock:
+            self.n = self.initial_n
+            init_shares = _PLAYER_CFG.get("initial_shares", 50)
+            self.players = [
+                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": init_shares}])
+                for i in range(self.n)
+            ]
+            self.manual_player = Player(
+                id="YOU", stock=[{"name": self.stock.name, "qty": init_shares}]
+            )
+            self.you_cost_basis = self.manual_player.cash + init_shares * self.stock.price
+            self.next_times = [
+                self.t + random.expovariate(max(p.epsilon, 0.05) * 2)
+                for p in self.players
+            ]
+            self.market.bids.clear()
+            self.market.asks.clear()
+            return self.n
 
     def step(self, dt=0.25):
         with self.lock:
@@ -78,7 +105,7 @@ class LiveSimulation:
                 self.manual_player.buy(self.market, self.stock, price, amount, t=self.t)
                 return True, "Buy order submitted."
             if side == "sell":
-                if self.manual_player.get_qty(self.stock) < amount:
+                if not _PLAYER_CFG.get("allow_short_selling", True) and self.manual_player.get_qty(self.stock) < amount:
                     return False, "Insufficient shares."
                 self.manual_player.sell(self.market, self.stock, price, amount, t=self.t)
                 return True, "Sell order submitted."
@@ -142,6 +169,16 @@ class LiveSimulation:
             self.manual_player.cash += amount
             self.you_cost_basis += amount
             return True, f"Injected ${amount:,.2f} to all players."
+
+    def inject_stock(self, qty=10):
+        with self.lock:
+            if qty <= 0:
+                return False, "Quantity must be positive."
+            for p in self.players:
+                p.add_stock(self.stock, qty)
+            self.manual_player.add_stock(self.stock, qty)
+            self.you_cost_basis += qty * self.stock.price
+            return True, f"Added {qty} {self.stock.name} shares to all players."
 
     def _build_candles(self, interval=60.0):
         interval = max(1.0, float(interval))
@@ -269,17 +306,18 @@ class LiveSimulation:
             }
 
 
-sim = LiveSimulation(n=50, duration=None)
+sim = LiveSimulation()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop_event = threading.Event()
+    tick_dt = _SIM_CFG.get("tick_dt", 0.05)
 
     def ticker():
         while not stop_event.is_set():
-            sim.step(dt=0.05)
-            time.sleep(0.05)
+            sim.step(dt=tick_dt)
+            time.sleep(tick_dt)
 
     thread = threading.Thread(target=ticker, daemon=True)
     thread.start()
@@ -318,6 +356,10 @@ class CancelReq(BaseModel):
 
 class InjectReq(BaseModel):
     amount: float
+
+
+class InjectStockReq(BaseModel):
+    qty: int = 10
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -386,6 +428,18 @@ def inject_cash(req: InjectReq):
     return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
 
 
+@app.post("/api/inject_stock")
+def inject_stock(req: InjectStockReq):
+    ok, msg = sim.inject_stock(req.qty)
+    return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+
+@app.post("/api/reset_players")
+def reset_players():
+    total = sim.reset_players()
+    return {"ok": True, "total_players": total, "message": f"Reset to {total} players."}
+
+
 @app.websocket("/ws")
 async def ws_state(websocket: WebSocket, interval: float = 60.0):
     await websocket.accept()
@@ -412,4 +466,9 @@ async def ws_state(websocket: WebSocket, interval: float = 60.0):
 
 
 if __name__ == "__main__":
-    uvicorn.run("dashboard:app", host="127.0.0.1", port=5005, reload=True)
+    uvicorn.run(
+        "dashboard:app",
+        host=_SERVER_CFG.get("host", "127.0.0.1"),
+        port=_SERVER_CFG.get("port", 5005),
+        reload=True,
+    )

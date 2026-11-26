@@ -1,11 +1,31 @@
 from datetime import datetime
+import json
 import os
+from pathlib import Path
 import random
 import matplotlib.pyplot as plt
 
 
+def load_config():
+    cfg_path = Path(__file__).with_name("config.json")
+    if cfg_path.exists():
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    return {}
+
+
+CFG = load_config()
+_STOCK_CFG = CFG.get("stock", {})
+_PLAYER_CFG = CFG.get("player", {})
+_SIM_CFG = CFG.get("simulation", {})
+
+
 class stock:
-    def __init__(self, name: str = "AAPL", price: float = 100.0, numberOfStock: float = 0):
+    def __init__(
+        self,
+        name: str = _STOCK_CFG.get("name", "AAPL"),
+        price: float = _STOCK_CFG.get("initial_price", 100.0),
+        numberOfStock: float = _STOCK_CFG.get("number_of_stock", 1000),
+    ):
         self.name = name
         self.price = price
         self.numberOfStock = numberOfStock
@@ -83,16 +103,18 @@ class exchange:
 
 
 class Player:
-    def __init__(self, id=None, cash=1000000.0, stock=None, epsilon=None, strategy=None):
+    def __init__(self, id=None, cash=None, stock=None, epsilon=None, strategy=None):
         self.id = id
-        self.cash = cash
+        self.cash = _PLAYER_CFG.get("initial_cash", 1000000.0) if cash is None else cash
         self.stock = [dict(item) for item in stock] if stock else []  # list of {"name": str, "qty": int}
         self.epsilon = random.uniform(0, 1) if epsilon is None else epsilon
+        init_price = _STOCK_CFG.get("initial_price", 100.0)
+        spread = _PLAYER_CFG.get("target_price_range", 5.0)
         self.strategy = (
             dict(strategy)
             if strategy is not None
             else {
-                "target_price": round(random.uniform(95.0, 105.0), 2),
+                "target_price": round(random.uniform(init_price - spread, init_price + spread), 2),
                 "type": random.choice(["buy_below", "sell_above", "buy_sell"]),
             }
         )
@@ -115,15 +137,19 @@ class Player:
             market.submitBuyOrder(s, price, amount, self, t=t)
 
     def sell(self, market, s, price, amount, t=0.0):
-        if self.get_qty(s) >= amount:
+        if _PLAYER_CFG.get("allow_short_selling", True) or self.get_qty(s) >= amount:
             market.submitSellOrder(s, price, amount, self, t=t)
 
     def act(self, market, s, t=0.0):
         """Submit an order around current price according to the player's strategy."""
         target = self.strategy["target_price"]
         stype = self.strategy["type"]
-        price = round(max(0.01, s.price + random.uniform(-2.0, 2.0)), 2)
-        amount = random.randint(1, 10)
+        p_spread = _PLAYER_CFG.get("price_spread", 2.0)
+        price = round(max(0.01, s.price + random.uniform(-p_spread, p_spread)), 2)
+        amount = random.randint(
+            _PLAYER_CFG.get("min_order_qty", 1),
+            _PLAYER_CFG.get("max_order_qty", 10),
+        )
 
         if stype in ("buy_below", "buy_sell") and s.price < target:
             self.buy(market, s, price, amount, t=t)
@@ -131,11 +157,14 @@ class Player:
             self.sell(market, s, price, amount, t=t)
 
 
-def run_simulation(n=50, duration=600.0):
+def run_simulation(n=None, duration=600.0):
     """Run one AAPL market simulation and return (history, final_price, tx_count)."""
+    if n is None:
+        n = _SIM_CFG.get("initial_players", 50)
+    init_shares = _PLAYER_CFG.get("initial_shares", 50)
     market = exchange()
-    s = stock(name="AAPL", price=100.0, numberOfStock=1000)
-    players = [Player(id=i + 1, stock=[{"name": s.name, "qty": 50}]) for i in range(n)]
+    s = stock()
+    players = [Player(id=i + 1, stock=[{"name": s.name, "qty": init_shares}]) for i in range(n)]
 
     next_times = [random.expovariate(max(p.epsilon, 0.05) * 2) for p in players]
     market.history[s.name] = [(0.0, s.price)]

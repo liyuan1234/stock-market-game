@@ -76,8 +76,10 @@
         <option value="bear">Sellers (Bear)</option>
       </select>
       <button onclick="addPlayers()">+ Players</button>
+      <button onclick="resetPlayers()">Reset Players</button>
       <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
       <button onclick="injectCash()">+ $ All</button>
+      <button onclick="injectStock()">+ 10 Stocks</button>
     </div>
   </header>
 
@@ -88,15 +90,19 @@
           <button class="tab-btn active" id="tab-line" onclick="setChartMode('line')">Line Chart</button>
           <button class="tab-btn" id="tab-candle" onclick="setChartMode('candle')">Candlestick</button>
         </div>
-        <select id="interval-sel" style="display:none;" onchange="setIntervalSec(this.value)">
-          <option value="1">1s</option>
-          <option value="5">5s</option>
-          <option value="10">10s</option>
-          <option value="30">30s</option>
-          <option value="60" selected>1m</option>
-          <option value="120">2m</option>
-          <option value="300">5m</option>
-        </select>
+        <div id="candle-tools" style="display:none;gap:6px;align-items:center;">
+          <button class="tab-btn" id="ind-ma" style="display:none;" onclick="toggleIndicator('ma')">MA (5/15)</button>
+          <button class="tab-btn" id="ind-bb" style="display:none;" onclick="toggleIndicator('bb')">BB (10)</button>
+          <select id="interval-sel" onchange="setIntervalSec(this.value)">
+            <option value="1">1s</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="30">30s</option>
+            <option value="60" selected>1m</option>
+            <option value="120">2m</option>
+            <option value="300">5m</option>
+          </select>
+        </div>
       </div>
       <div class="ohlc-bar" id="ohlc-bar"></div>
       <canvas id="chart"></canvas>
@@ -192,11 +198,25 @@
       return res.json();
     }
 
+    let showMA = false;
+    let showBB = false;
+
+    function toggleIndicator(name) {
+      if (name === 'ma') {
+        showMA = !showMA;
+        document.getElementById('ind-ma').classList.toggle('active', showMA);
+      } else if (name === 'bb') {
+        showBB = !showBB;
+        document.getElementById('ind-bb').classList.toggle('active', showBB);
+      }
+      if (lastData && chartMode === 'candle') drawCandles(lastData.candles);
+    }
+
     function setChartMode(mode) {
       chartMode = mode;
       document.getElementById('tab-line').classList.toggle('active', mode === 'line');
       document.getElementById('tab-candle').classList.toggle('active', mode === 'candle');
-      document.getElementById('interval-sel').style.display = mode === 'candle' ? 'inline-block' : 'none';
+      document.getElementById('candle-tools').style.display = mode === 'candle' ? 'flex' : 'none';
       hoverIdx = -1;
       if (lastData) renderChart(lastData);
     }
@@ -254,6 +274,16 @@
         document.getElementById('ord-msg').textContent = res.message || '';
         refresh();
       }
+    }
+
+    async function injectStock() {
+      const res = await postAction('/api/inject_stock', { qty: 10 });
+      document.getElementById('ord-msg').textContent = res.message || '';
+    }
+
+    async function resetPlayers() {
+      const res = await postAction('/api/reset_players');
+      document.getElementById('ord-msg').textContent = res.message || '';
     }
 
     async function cancelOrder(orderId) {
@@ -386,8 +416,62 @@
 
       const activeIdx = hoverIdx >= 0 && hoverIdx < candles.length ? hoverIdx : candles.length - 1;
       const ac = candles[activeIdx];
-      document.getElementById('ohlc-bar').textContent =
-        `[${fmtTime(ac.time)}]  O: ${ac.open.toFixed(2)}   H: ${ac.high.toFixed(2)}   L: ${ac.low.toFixed(2)}   C: ${ac.close.toFixed(2)}   Vol: ${ac.volume}`;
+      let ohlcText = `[${fmtTime(ac.time)}]  O: ${ac.open.toFixed(2)}   H: ${ac.high.toFixed(2)}   L: ${ac.low.toFixed(2)}   C: ${ac.close.toFixed(2)}   Vol: ${ac.volume}`;
+
+      function calcSMA(period) {
+        return candles.map((_, i) => {
+          if (i + 1 < period) return null;
+          let sum = 0;
+          for (let j = i - period + 1; j <= i; j++) sum += candles[j].close;
+          return sum / period;
+        });
+      }
+
+      function drawLineOverlay(vals, color, dash = []) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        let started = false;
+        vals.forEach((v, i) => {
+          if (v === null) return;
+          const x = pad.left + (i + 0.5) * slotW;
+          const y = pad.top + ((maxP - v) / spanP) * priceH;
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      if (showMA) {
+        const ma5 = calcSMA(5);
+        const ma15 = calcSMA(15);
+        drawLineOverlay(ma5, '#e3b341');
+        drawLineOverlay(ma15, '#bc8cff');
+        if (ma5[activeIdx] !== null) ohlcText += `   MA5: ${ma5[activeIdx].toFixed(2)}`;
+        if (ma15[activeIdx] !== null) ohlcText += `   MA15: ${ma15[activeIdx].toFixed(2)}`;
+      }
+
+      if (showBB) {
+        const period = 10;
+        const mid = calcSMA(period);
+        const upper = [];
+        const lower = [];
+        candles.forEach((_, i) => {
+          if (mid[i] === null) { upper.push(null); lower.push(null); return; }
+          let sq = 0;
+          for (let j = i - period + 1; j <= i; j++) sq += (candles[j].close - mid[i]) ** 2;
+          const sd = Math.sqrt(sq / period);
+          upper.push(mid[i] + 2 * sd);
+          lower.push(mid[i] - 2 * sd);
+        });
+        drawLineOverlay(upper, 'rgba(88,166,255,0.65)', [4, 3]);
+        drawLineOverlay(mid, 'rgba(88,166,255,0.4)');
+        drawLineOverlay(lower, 'rgba(88,166,255,0.65)', [4, 3]);
+      }
+
+      document.getElementById('ohlc-bar').textContent = ohlcText;
 
       if (hoverIdx >= 0 && hoverIdx < candles.length) {
         const hx = pad.left + (hoverIdx + 0.5) * slotW;
