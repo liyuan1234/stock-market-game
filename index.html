@@ -37,7 +37,14 @@
     .bid { color: var(--green); }
     .spread { text-align: center; padding: 6px; margin: 4px 0; background: #21262d; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .trade-form { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
-    .trade-form input { width: 80px; cursor: text; }
+    .trade-form input[type="number"] { width: 80px; cursor: text; }
+    .slider-group { display: inline-flex; flex-direction: column; min-width: 120px; gap: 2px; }
+    .slider-top { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
+    .slider-top strong { color: var(--text); font-variant-numeric: tabular-nums; }
+    .slider-group input[type="range"] { width: 100%; padding: 0; accent-color: var(--blue); cursor: pointer; height: 14px; }
+    .slider-marks { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); }
+    .slider-marks span { cursor: pointer; padding: 0 2px; }
+    .slider-marks span:hover { color: var(--blue); }
     .status-msg { font-size: 12px; color: var(--muted); margin-top: 6px; }
     .chart-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
     .tabs { display: flex; gap: 6px; }
@@ -75,7 +82,22 @@
           <option value="5">5x</option>
           <option value="10">10x</option>
         </select>
-        <input type="number" id="add-n" min="1" max="500" value="10" style="width:65px;cursor:text;" />
+        <div class="slider-group">
+          <div class="slider-top"><span>Bots</span><strong id="add-n-val">10</strong></div>
+          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="pow10-marks" oninput="syncSlider('add-n')" />
+          <div class="slider-marks">
+            <span onclick="setSliderVal('add-n', 1)">1</span>
+            <span onclick="setSliderVal('add-n', 10)">10</span>
+            <span onclick="setSliderVal('add-n', 100)">100</span>
+            <span onclick="setSliderVal('add-n', 1000)">1000</span>
+          </div>
+        </div>
+        <datalist id="pow10-marks">
+          <option value="0"></option>
+          <option value="1"></option>
+          <option value="2"></option>
+          <option value="3"></option>
+        </datalist>
         <select id="add-bias">
           <option value="random" selected>Random</option>
           <option value="bull">Buyers (Bull)</option>
@@ -153,7 +175,16 @@
           <option value="market">Market</option>
         </select>
         <input type="number" id="ord-price" step="0.01" min="0.01" value="100.00" placeholder="Price" />
-        <input type="number" id="ord-qty" step="1" min="1" value="5" placeholder="Qty" />
+        <div class="slider-group" style="min-width:110px;">
+          <div class="slider-top"><span>Shares</span><strong id="ord-qty-val">5</strong></div>
+          <input type="range" id="ord-qty" min="0" max="3" step="0.01" value="0.7" list="pow10-marks" oninput="syncSlider('ord-qty')" />
+          <div class="slider-marks">
+            <span onclick="setSliderVal('ord-qty', 1)">1</span>
+            <span onclick="setSliderVal('ord-qty', 10)">10</span>
+            <span onclick="setSliderVal('ord-qty', 100)">100</span>
+            <span onclick="setSliderVal('ord-qty', 1000)">1000</span>
+          </div>
+        </div>
         <button class="btn-buy" onclick="placeOrder('buy')">Buy</button>
         <button class="btn-sell" onclick="placeOrder('sell')">Sell</button>
         <button onclick="depositCash()">+$1M</button>
@@ -287,10 +318,24 @@
       priceEl.style.opacity = isMarket ? '0.45' : '1';
     }
 
+    function sliderToInt(id) {
+      const v = Number(document.getElementById(id).value);
+      return Math.max(1, Math.round(Math.pow(10, v)));
+    }
+
+    function syncSlider(id) {
+      document.getElementById(`${id}-val`).textContent = sliderToInt(id);
+    }
+
+    function setSliderVal(id, num) {
+      document.getElementById(id).value = Math.log10(Math.max(1, num));
+      syncSlider(id);
+    }
+
     async function placeOrder(side) {
       const order_type = document.getElementById('ord-type').value;
       const price = Number(document.getElementById('ord-price').value);
-      const rawQty = Number(document.getElementById('ord-qty').value);
+      const rawQty = sliderToInt('ord-qty');
       if (!Number.isInteger(rawQty) || rawQty <= 0) {
         document.getElementById('ord-msg').textContent = 'Quantity must be a positive whole number.';
         return;
@@ -313,7 +358,7 @@
     }
 
     async function addPlayers() {
-      const count = Number(document.getElementById('add-n').value);
+      const count = sliderToInt('add-n');
       const bias = document.getElementById('add-bias').value;
       if (count > 0) {
         await postAction('/api/add_players', { count, bias });
