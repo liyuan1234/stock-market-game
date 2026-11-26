@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Market Game - Login</title>
+  <style>
+    :root {
+      --bg: #0d1117; --card: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --blue: #58a6ff; --red: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
+    }
+    .card {
+      width: 100%; max-width: 380px; background: var(--card);
+      border: 1px solid var(--border); border-radius: 10px; padding: 24px;
+    }
+    h1 { font-size: 20px; margin-bottom: 6px; }
+    p { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input {
+      width: 100%; background: #0d1117; color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 9px 12px; font-size: 14px; margin-bottom: 14px;
+    }
+    input:focus { outline: none; border-color: var(--blue); }
+    button {
+      width: 100%; background: rgba(88,166,255,0.2); color: var(--blue);
+      border: 1px solid var(--blue); border-radius: 6px;
+      padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: rgba(88,166,255,0.3); }
+    .err { color: var(--red); font-size: 12px; margin-top: 10px; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>AAPL Market Login</h1>
+    <p>Enter a username and starting balance to join the market.</p>
+    <form id="login-form">
+      <label for="username">Username</label>
+      <input type="text" id="username" placeholder="Enter username" required autofocus />
+      <label for="initial-amount">Initial Amount ($)</label>
+      <input type="number" id="initial-amount" min="1" step="1000" value="1000000" required />
+      <button type="submit">Enter</button>
+    </form>
+    <div class="err" id="err-msg"></div>
+  </div>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value.trim();
+      const initial_amount = Number(document.getElementById('initial-amount').value);
+      const errEl = document.getElementById('err-msg');
+      errEl.textContent = '';
+
+      if (!username) {
+        errEl.textContent = 'Username is required.';
+        return;
+      }
+
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, initial_amount }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errEl.textContent = data.message || 'Login failed.';
+        return;
+      }
+      window.location.href = '/';
+    });
+  </script>
+</body>
+</html>

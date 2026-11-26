@@ -5,11 +5,12 @@ import random
 import threading
 import time
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Cookie, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 import uvicorn
 
+from db import create_user, init_db, record_order
 from main import CFG, Player, exchange, stock
 
 _SIM_CFG = CFG.get("simulation", {})
@@ -27,6 +28,9 @@ class LiveSimulation:
         self.duration = _SIM_CFG.get("duration", None) if duration is None else duration
         self.running = True
         self.speed = 1.0
+        self.current_user_id = None
+        self.current_username = "YOU"
+        init_db()
         self.reset()
 
     def reset(self):
@@ -91,6 +95,18 @@ class LiveSimulation:
                 self.market.history[self.stock.name].append((self.duration, self.stock.price))
                 self.running = False
 
+    def set_user(self, user_id: int, username: str, initial_cash: float):
+        with self.lock:
+            init_shares = _PLAYER_CFG.get("initial_shares", 50)
+            self.current_user_id = user_id
+            self.current_username = username
+            self.manual_player = Player(
+                id=username,
+                cash=initial_cash,
+                stock=[{"name": self.stock.name, "qty": init_shares}],
+            )
+            self.you_cost_basis = initial_cash + init_shares * self.stock.price
+
     def submit_manual_order(self, side, price, amount):
         with self.lock:
             if price <= 0 or amount <= 0:
@@ -99,11 +115,31 @@ class LiveSimulation:
                 if self.manual_player.cash < price * amount:
                     return False, "Insufficient cash."
                 self.manual_player.buy(self.market, self.stock, price, amount, t=self.t)
+                if self.current_user_id is not None:
+                    record_order(
+                        userid=self.current_user_id,
+                        stock_name=self.stock.name,
+                        side="buy",
+                        time=round(self.t, 4),
+                        order_price=price,
+                        order_amount=amount,
+                        user_balance=round(self.manual_player.cash, 2),
+                    )
                 return True, "Buy order submitted."
             if side == "sell":
                 if not _PLAYER_CFG.get("allow_short_selling", True) and self.manual_player.get_qty(self.stock) < amount:
                     return False, "Insufficient shares."
                 self.manual_player.sell(self.market, self.stock, price, amount, t=self.t)
+                if self.current_user_id is not None:
+                    record_order(
+                        userid=self.current_user_id,
+                        stock_name=self.stock.name,
+                        side="sell",
+                        time=round(self.t, 4),
+                        order_price=price,
+                        order_amount=amount,
+                        user_balance=round(self.manual_player.cash, 2),
+                    )
                 return True, "Sell order submitted."
             return False, "Invalid side."
 
@@ -297,6 +333,7 @@ class LiveSimulation:
                 "transactions": txs,
                 "leaderboard": leaderboard[:10],
                 "you": {
+                    "username": self.current_username,
                     "cash": round(self.manual_player.cash, 2),
                     "qty": you_qty,
                     "value": round(self.manual_player.cash + you_qty * price, 2),
@@ -362,8 +399,42 @@ class InjectStockReq(BaseModel):
     qty: int = 10
 
 
+class LoginReq(BaseModel):
+    username: str
+    initial_amount: float = 1000000.0
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    html = Path(__file__).with_name("login.html").read_text(encoding="utf-8")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/login")
+def login(req: LoginReq):
+    username = req.username.strip()
+    if not username:
+        return JSONResponse({"ok": False, "message": "Username is required."}, status_code=400)
+    if req.initial_amount <= 0:
+        return JSONResponse({"ok": False, "message": "Initial amount must be positive."}, status_code=400)
+    user = create_user(username, req.initial_amount)
+    sim.set_user(user["id"], user["username"], user["initial_cash"])
+    resp = JSONResponse({"ok": True, "user": user})
+    resp.set_cookie(key="userid", value=str(user["id"]), httponly=True, samesite="lax")
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("userid")
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index(userid: str | None = Cookie(default=None)):
+    if not userid or sim.current_user_id is None:
+        return RedirectResponse(url="/login", status_code=302)
     html = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 

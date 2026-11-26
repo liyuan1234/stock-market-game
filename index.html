@@ -80,6 +80,7 @@
       <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
       <button onclick="injectCash()">+ $ All</button>
       <button onclick="injectStock()">+ 10 Stocks</button>
+      <button onclick="logout()">Logout</button>
     </div>
   </header>
 
@@ -284,6 +285,11 @@
     async function resetPlayers() {
       const res = await postAction('/api/reset_players');
       document.getElementById('ord-msg').textContent = res.message || '';
+    }
+
+    async function logout() {
+      await postAction('/api/logout');
+      window.location.href = '/login';
     }
 
     async function cancelOrder(orderId) {
@@ -643,7 +649,7 @@
       const pnlSign = pnl >= 0 ? '+' : '-';
       const pnlCls = pnl >= 0 ? 'bid' : 'ask';
       document.getElementById('you-info').innerHTML =
-        `YOU: $${data.you.cash.toFixed(2)} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
+        `${data.you.username || 'YOU'}: $${data.you.cash.toFixed(2)} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
 
       setHtml('asks-body', data.asks
         .map(a => `<tr class="ask"><td>Ask${a.is_you ? ' (YOU)' : ''}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${a.id}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
