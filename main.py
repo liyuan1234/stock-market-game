@@ -1,4 +1,7 @@
+from datetime import datetime
+import os
 import random
+import matplotlib.pyplot as plt
 
 
 class stock:
@@ -11,25 +14,35 @@ class stock:
 class exchange:
     def __init__(self):
         self.stocks = {}  # {"AAPL": 100.0}
-        self.bids = []  # list of {"price": float, "amount": int, "player": Player}
-        self.asks = []  # list of {"price": float, "amount": int, "player": Player}
+        self.bids = []  # list of {"id": int, "price": float, "amount": int, "player": Player}
+        self.asks = []  # list of {"id": int, "price": float, "amount": int, "player": Player}
+        self.transactions = []  # list of {"id", "time", "price", "qty", "buyer_id", "seller_id"}
+        self.history = {}  # {"AAPL": [(time, price), ...]}
+        self._order_id = 1
+        self._tx_id = 1
 
-    def submitBuyOrder(self, s, price, amount, player=None):
-        self.bids.append({"price": price, "amount": amount, "player": player})
-        self.bids.sort(key=lambda x: -x["price"])
-        self._match(s)
+    def submitBuyOrder(self, s, price, amount, player=None, t=0.0):
+        self.bids.append({"id": self._order_id, "price": price, "amount": amount, "player": player})
+        self._order_id += 1
+        self.bids.sort(key=lambda x: (-x["price"], x["id"]))
+        self._match(s, t)
 
-    def submitSellOrder(self, s, price, amount, player=None):
-        self.asks.append({"price": price, "amount": amount, "player": player})
-        self.asks.sort(key=lambda x: x["price"])
-        self._match(s)
+    def submitSellOrder(self, s, price, amount, player=None, t=0.0):
+        self.asks.append({"id": self._order_id, "price": price, "amount": amount, "player": player})
+        self._order_id += 1
+        self.asks.sort(key=lambda x: (x["price"], x["id"]))
+        self._match(s, t)
 
-    def _match(self, s):
+    def _match(self, s, t=0.0):
+        if s.name not in self.history:
+            self.history[s.name] = [(0.0, s.price)]
+
         while self.bids and self.asks and self.bids[0]["price"] >= self.asks[0]["price"]:
             bid = self.bids[0]
             ask = self.asks[0]
             qty = min(bid["amount"], ask["amount"])
-            trade_price = ask["price"]
+            # Execute at the resting (older) order's price
+            trade_price = ask["price"] if ask["id"] < bid["id"] else bid["price"]
 
             bid["amount"] -= qty
             ask["amount"] -= qty
@@ -42,11 +55,22 @@ class exchange:
                 ask["player"].cash += trade_price * qty
                 ask["player"].add_stock(s, -qty)
 
+            self.transactions.append({
+                "id": self._tx_id,
+                "time": round(t, 4),
+                "price": trade_price,
+                "qty": qty,
+                "buyer_id": bid["player"].id if bid["player"] else None,
+                "seller_id": ask["player"].id if ask["player"] else None,
+            })
+            self._tx_id += 1
+            self.history[s.name].append((t, s.price))
+
             if bid["amount"] == 0:
                 self.bids.pop(0)
             if ask["amount"] == 0:
                 self.asks.pop(0)
-        #update stock price in self.stocks
+        # update stock price in self.stocks
         self.stocks[s.name] = s.price
     def listbidask(self, s):
         print(f"Price: {s.price:.2f}")
@@ -59,9 +83,11 @@ class exchange:
 
 
 class Player:
-    def __init__(self, cash=10000.0, stock=None):
+    def __init__(self, id=None, cash=10000.0, stock=None, epsilon=None):
+        self.id = id
         self.cash = cash
         self.stock = [dict(item) for item in stock] if stock else []  # list of {"name": str, "qty": int}
+        self.epsilon = random.uniform(0, 1) if epsilon is None else epsilon
 
     def get_qty(self, s):
         for item in self.stock:
@@ -76,32 +102,69 @@ class Player:
                 return
         self.stock.append({"name": s.name, "qty": qty})
 
-    def buy(self, market, s, price, amount):
+    def buy(self, market, s, price, amount, t=0.0):
         if self.cash >= price * amount:
-            market.submitBuyOrder(s, price, amount, self)
+            market.submitBuyOrder(s, price, amount, self, t=t)
 
-    def sell(self, market, s, price, amount):
+    def sell(self, market, s, price, amount, t=0.0):
         if self.get_qty(s) >= amount:
-            market.submitSellOrder(s, price, amount, self)
+            market.submitSellOrder(s, price, amount, self, t=t)
+
+
+def run_simulation(n=50, duration=600.0):
+    """Run one AAPL market simulation and return (history, final_price, tx_count)."""
+    market = exchange()
+    s = stock(name="AAPL", price=100.0, numberOfStock=1000)
+    players = [Player(id=i + 1, stock=[{"name": s.name, "qty": 50}]) for i in range(n)]
+
+    next_times = [random.expovariate(max(p.epsilon, 0.05) * 2) for p in players]
+    market.history[s.name] = [(0.0, s.price)]
+
+    while True:
+        idx = min(range(n), key=lambda i: next_times[i])
+        t = next_times[idx]
+        if t > duration:
+            break
+
+        p = players[idx]
+        price = round(max(0.01, s.price + random.uniform(-2.0, 2.0)), 2)
+        amount = random.randint(1, 10)
+
+        if random.choice([True, False]):
+            p.buy(market, s, price, amount, t=t)
+        else:
+            p.sell(market, s, price, amount, t=t)
+
+        next_times[idx] = t + random.expovariate(max(p.epsilon, 0.05) * 2)
+
+    market.history[s.name].append((duration, s.price))
+    return market.history[s.name], s.price, len(market.transactions)
+
+
+def plot_price_history(history, symbol, output_dir="images"):
+    """Plot price against time and save to output_dir with timestamp."""
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(output_dir, f"{symbol.lower()}_{timestamp}.png")
+
+    times = [t for t, _ in history]
+    prices = [p for _, p in history]
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(times, prices)
+    plt.title(f"{symbol} Price vs Time")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Price")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    return out_path
 
 
 if __name__ == "__main__":
-    # create n players, and submit buy and sell at random.
-    market = exchange()
-    s = stock(name="AAPL", price=100.0, numberOfStock=1000)
+    history, final_price, tx_count = run_simulation(n=50, duration=120.0)
+    print(f"Final price: {final_price:.2f}, transactions: {tx_count}")
 
-    n = 10
-    players = [Player(stock=[{"name": s.name, "qty": 50}]) for _ in range(n)]
-
-    for _ in range(100):
-        p = random.choice(players)
-        price = round(random.uniform(95, 105), 2)
-        amount = random.randint(1, 10)
-        if random.choice([True, False]):
-            p.buy(market, s, price, amount)
-        else:
-            p.sell(market, s, price, amount)
-
-    market.listbidask(s)
-    for i, p in enumerate(players):
-        print(f"Player {i + 1}: cash={p.cash:.2f}, stock={p.stock}")
+    saved_path = plot_price_history(history, "AAPL")
+    print(f"Saved plot to {saved_path}")
