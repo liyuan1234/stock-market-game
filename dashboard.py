@@ -661,6 +661,10 @@ class LiveSimulation:
 
             leaderboard = []
             breakdown = {"bull": 0, "bear": 0, "both": 0}
+            bot_init_basis = (
+                _BOT_CFG.get("initial_cash", 1000000.0)
+                + _BOT_CFG.get("initial_shares", 50) * CFG.get("stock", {}).get("initial_price", 100.0)
+            )
             for p in self.players:
                 stype = p.strategy["type"]
                 if stype == "buy_below":
@@ -670,16 +674,18 @@ class LiveSimulation:
                 else:
                     breakdown["both"] += 1
                 qty = p.get_qty(self.stock)
+                val = round(p.cash + qty * price, 2)
                 leaderboard.append({
                     "id": p.id,
+                    "is_you": False,
                     "strategy": stype,
                     "target": p.strategy["target_price"],
                     "eps": round(p.epsilon, 2),
                     "cash": round(p.cash, 2),
                     "qty": qty,
-                    "value": round(p.cash + qty * price, 2),
+                    "value": val,
+                    "pnl": round(val - bot_init_basis, 2),
                 })
-            leaderboard.sort(key=lambda x: -x["value"])
 
             if manual_player is not None:
                 you_qty = manual_player.get_qty(self.stock)
@@ -689,6 +695,17 @@ class LiveSimulation:
                 you_val = round(manual_player.cash + you_qty * price, 2)
                 you_pnl = round(you_val - cost_basis, 2)
                 you_pnl_pct = round((you_pnl / cost_basis) * 100, 2) if cost_basis else 0.0
+                leaderboard.append({
+                    "id": sess["username"],
+                    "is_you": True,
+                    "strategy": "manual",
+                    "target": None,
+                    "eps": None,
+                    "cash": you_cash,
+                    "qty": you_qty,
+                    "value": you_val,
+                    "pnl": you_pnl,
+                })
             else:
                 you_qty = 0
                 you_cash = 0.0
@@ -697,6 +714,8 @@ class LiveSimulation:
                 you_val = 0.0
                 you_pnl = 0.0
                 you_pnl_pct = 0.0
+
+            leaderboard.sort(key=lambda x: -x["pnl"])
 
             return {
                 "symbol": self.stock.name,

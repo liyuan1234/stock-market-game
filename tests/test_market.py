@@ -214,6 +214,49 @@ class TestDashboardSessionAndPersistence(unittest.TestCase):
             state = c.get("/api/state").json()
             self.assertEqual(len(state["your_orders"]), 1)
 
+    def test_my_transactions_endpoint_and_version_tracking(self):
+        self.assertEqual(self.client.get("/api/my_transactions").status_code, 401)
+
+        c_alice = TestClient(dashboard.app)
+        c_bob = TestClient(dashboard.app)
+        c_alice.post("/api/login", json={"username": "AliceTx", "initial_amount": 100000.0})
+        c_bob.post("/api/login", json={"username": "BobTx", "initial_amount": 100000.0})
+
+        s0 = c_alice.get("/api/state").json()
+        v0 = s0["my_tx_version"]
+        self.assertEqual(c_alice.get("/api/my_transactions").json()["transactions"], [])
+
+        # Alice posts resting sell limit; version bumps and order is open
+        c_alice.post("/api/order", json={"side": "sell", "price": 102.0, "amount": 8, "order_type": "limit"})
+        s1 = c_alice.get("/api/state").json()
+        self.assertGreater(s1["my_tx_version"], v0)
+        txs1 = c_alice.get("/api/my_transactions").json()["transactions"]
+        self.assertEqual(len(txs1), 1)
+        self.assertEqual(txs1[0]["status"], "open")
+        self.assertEqual(txs1[0]["filled_amount"], 0)
+
+        # Bob partially fills 5 of Alice's 8 shares; Alice's my_tx_version bumps automatically
+        c_bob.post("/api/order", json={"side": "buy", "amount": 5, "order_type": "market"})
+        s2 = c_alice.get("/api/state").json()
+        self.assertGreater(s2["my_tx_version"], s1["my_tx_version"])
+        txs2 = c_alice.get("/api/my_transactions").json()["transactions"]
+        self.assertEqual(txs2[0]["status"], "partial")
+        self.assertEqual(txs2[0]["filled_amount"], 5)
+        self.assertAlmostEqual(txs2[0]["exec_price"], 102.0)
+
+        # Bob only sees Bob's own transaction, not Alice's
+        bob_txs = c_bob.get("/api/my_transactions").json()["transactions"]
+        self.assertEqual(len(bob_txs), 1)
+        self.assertEqual(bob_txs[0]["side"], "buy")
+        self.assertEqual(bob_txs[0]["order_type"], "market")
+
+        # Reset cancels Alice's remaining open shares in DB and bumps version
+        c_alice.post("/api/reset")
+        s3 = c_alice.get("/api/state").json()
+        self.assertGreater(s3["my_tx_version"], s2["my_tx_version"])
+        txs3 = c_alice.get("/api/my_transactions").json()["transactions"]
+        self.assertEqual(txs3[0]["status"], "partial_cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()
