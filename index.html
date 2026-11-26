@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AAPL Live Market Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117; --card: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
+      --red: #f85149; --blue: #58a6ff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 16px; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 16px; }
+    .ticker { display: flex; align-items: baseline; gap: 14px; }
+    .ticker h1 { font-size: 20px; }
+    .price { font-size: 26px; font-weight: 700; color: var(--blue); }
+    .meta { color: var(--muted); font-size: 13px; }
+    .controls { display: flex; gap: 8px; align-items: center; }
+    button, select, input { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+    button:hover { border-color: var(--blue); }
+    .btn-buy { background: rgba(63,185,80,0.18); border-color: var(--green); color: var(--green); }
+    .btn-sell { background: rgba(248,81,73,0.18); border-color: var(--red); color: var(--red); }
+    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+    .card h2 { font-size: 14px; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    canvas { width: 100%; height: 320px; display: block; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid #21262d; }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    .ask { color: var(--red); }
+    .bid { color: var(--green); }
+    .spread { text-align: center; padding: 6px; margin: 4px 0; background: #21262d; border-radius: 4px; font-weight: 600; font-size: 13px; }
+    .trade-form { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+    .trade-form input { width: 80px; cursor: text; }
+    .status-msg { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .chart-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .tabs { display: flex; gap: 6px; }
+    .tab-btn { padding: 4px 10px; font-size: 12px; background: #21262d; border: 1px solid var(--border); color: var(--muted); }
+    .tab-btn.active { color: var(--text); border-color: var(--blue); background: rgba(88,166,255,0.15); }
+    .ohlc-bar { font-family: monospace; font-size: 12px; color: var(--muted); margin-bottom: 6px; min-height: 16px; }
+    .ratio-wrap { margin-bottom: 8px; }
+    .ratio-labels { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; font-weight: 600; }
+    .ratio-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #21262d; }
+    .ratio-bid { background: var(--green); transition: width 0.15s ease; }
+    .ratio-ask { background: var(--red); transition: width 0.15s ease; }
+    #book-hist { height: 240px; }
+    @media (max-width: 900px) { .grid, .grid-2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="ticker">
+      <h1 id="symbol">AAPL</h1>
+      <span class="price" id="price">$100.00</span>
+      <span class="meta" id="sim-time">Time: 0.0s</span>
+      <span class="meta" id="tx-count">Trades: 0</span>
+      <span class="meta" id="player-count">Players: 50</span>
+    </div>
+    <div class="controls">
+      <button id="toggle-btn" onclick="toggleRun()">Pause</button>
+      <button onclick="postAction('/api/reset')">Reset</button>
+      <select id="speed-sel" onchange="setSpeed(this.value)">
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="5">5x</option>
+        <option value="10">10x</option>
+      </select>
+      <input type="number" id="add-n" min="1" max="500" value="10" style="width:65px;cursor:text;" />
+      <select id="add-bias">
+        <option value="random" selected>Random</option>
+        <option value="bull">Buyers (Bull)</option>
+        <option value="bear">Sellers (Bear)</option>
+      </select>
+      <button onclick="addPlayers()">+ Players</button>
+      <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
+      <button onclick="injectCash()">+ $ All</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="chart-header">
+        <div class="tabs">
+          <button class="tab-btn active" id="tab-line" onclick="setChartMode('line')">Line Chart</button>
+          <button class="tab-btn" id="tab-candle" onclick="setChartMode('candle')">Candlestick</button>
+        </div>
+        <select id="interval-sel" style="display:none;" onchange="setIntervalSec(this.value)">
+          <option value="1">1s</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+          <option value="60" selected>1m</option>
+          <option value="120">2m</option>
+          <option value="300">5m</option>
+        </select>
+      </div>
+      <div class="ohlc-bar" id="ohlc-bar"></div>
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="card">
+      <div class="chart-header">
+        <h2 style="margin-bottom:0;">Order Book &amp; Manual Trade</h2>
+        <div class="tabs">
+          <button class="tab-btn active" id="tab-book-table" onclick="setBookMode('table')">Table</button>
+          <button class="tab-btn" id="tab-book-hist" onclick="setBookMode('hist')">Histogram</button>
+        </div>
+      </div>
+      <div class="status-msg" id="book-totals" style="margin-top:0;margin-bottom:4px;">Asks Total: 0 | Bids Total: 0</div>
+      <div class="ratio-wrap">
+        <div class="ratio-labels">
+          <span class="bid" id="bid-pct-lbl">Bid 50.0%</span>
+          <span class="ask" id="ask-pct-lbl">Ask 50.0%</span>
+        </div>
+        <div class="ratio-bar">
+          <div class="ratio-bid" id="ratio-bid" style="width:50%;"></div>
+          <div class="ratio-ask" id="ratio-ask" style="width:50%;"></div>
+        </div>
+      </div>
+      <div id="book-table-view">
+        <table>
+          <thead><tr><th>Side</th><th>Price</th><th>Amount</th><th></th></tr></thead>
+          <tbody id="asks-body"></tbody>
+        </table>
+        <div class="spread" id="mid-price">Last: $100.00</div>
+        <table>
+          <tbody id="bids-body"></tbody>
+        </table>
+      </div>
+      <div id="book-hist-view" style="display:none;">
+        <canvas id="book-hist"></canvas>
+      </div>
+      <div class="trade-form">
+        <input type="number" id="ord-price" step="1" value="100.00" placeholder="Price" />
+        <input type="number" id="ord-qty" step="1" min="1" value="5" placeholder="Qty" />
+        <button class="btn-buy" onclick="placeOrder('buy')">Buy</button>
+        <button class="btn-sell" onclick="placeOrder('sell')">Sell</button>
+        <button onclick="depositCash()">+$1M</button>
+      </div>
+      <div class="status-msg" id="you-info">YOU: $1000000.00 | 50 shares</div>
+      <div class="status-msg" id="ord-msg"></div>
+      <div class="status-msg" id="your-orders"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h2>Recent Transactions</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Time</th><th>Price</th><th>Qty</th><th>Buyer</th><th>Seller</th></tr></thead>
+        <tbody id="tx-body"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2 id="players-heading">Top Players (Total: 50)</h2>
+      <table>
+        <thead><tr><th>Player</th><th>Strategy</th><th>Target</th><th>Eps</th><th>Cash</th><th>Qty</th><th>Value</th></tr></thead>
+        <tbody id="lb-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let isRunning = true;
+    let chartMode = 'line';
+    let candleInterval = 60;
+    let lastData = null;
+    let hoverIdx = -1;
+    let smoothMinP = null;
+    let smoothMaxP = null;
+
+    function smoothRange(targetMin, targetMax) {
+      if (smoothMinP === null || smoothMaxP === null) {
+        smoothMinP = targetMin;
+        smoothMaxP = targetMax;
+      } else {
+        smoothMinP += (targetMin - smoothMinP) * 0.2;
+        smoothMaxP += (targetMax - smoothMaxP) * 0.2;
+      }
+      return [smoothMinP, smoothMaxP];
+    }
+
+    async function postAction(url, body = {}) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    }
+
+    function setChartMode(mode) {
+      chartMode = mode;
+      document.getElementById('tab-line').classList.toggle('active', mode === 'line');
+      document.getElementById('tab-candle').classList.toggle('active', mode === 'candle');
+      document.getElementById('interval-sel').style.display = mode === 'candle' ? 'inline-block' : 'none';
+      hoverIdx = -1;
+      if (lastData) renderChart(lastData);
+    }
+
+    function setIntervalSec(val) {
+      candleInterval = Number(val);
+      hoverIdx = -1;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ interval: candleInterval }));
+      } else {
+        refresh();
+      }
+    }
+
+    function fmtTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${m}:${String(s).padStart(2, '0')}`;
+    }
+
+    function toggleRun() {
+      postAction(isRunning ? '/api/pause' : '/api/start');
+    }
+
+    function setSpeed(val) {
+      postAction('/api/speed', { speed: Number(val) });
+    }
+
+    async function placeOrder(side) {
+      const price = Number(document.getElementById('ord-price').value);
+      const amount = Number(document.getElementById('ord-qty').value);
+      const res = await postAction('/api/order', { side, price, amount });
+      document.getElementById('ord-msg').textContent = res.message || '';
+    }
+
+    async function depositCash() {
+      const res = await postAction('/api/deposit', { amount: 1000000 });
+      document.getElementById('ord-msg').textContent = res.message || '';
+      refresh();
+    }
+
+    async function addPlayers() {
+      const count = Number(document.getElementById('add-n').value);
+      const bias = document.getElementById('add-bias').value;
+      if (count > 0) {
+        await postAction('/api/add_players', { count, bias });
+        refresh();
+      }
+    }
+
+    async function injectCash() {
+      const amount = Number(document.getElementById('inject-amt').value);
+      if (amount > 0) {
+        const res = await postAction('/api/inject', { amount });
+        document.getElementById('ord-msg').textContent = res.message || '';
+        refresh();
+      }
+    }
+
+    async function cancelOrder(orderId) {
+      const res = await postAction('/api/cancel', { order_id: orderId });
+      document.getElementById('ord-msg').textContent = res.message || '';
+      refresh();
+    }
+
+    function drawLineChart(history) {
+      document.getElementById('ohlc-bar').textContent = '';
+      const canvas = document.getElementById('chart');
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      if (!history || history.length < 2) return;
+
+      const pad = { top: 16, right: 56, bottom: 24, left: 12 };
+      const cw = w - pad.left - pad.right;
+      const ch = h - pad.top - pad.bottom;
+
+      const prices = history.map(p => p[1]);
+      const times = history.map(p => p[0]);
+      const [minP, maxP] = smoothRange(Math.min(...prices) - 0.5, Math.max(...prices) + 0.5);
+      const spanP = maxP - minP || 1;
+      const maxT = Math.max(times[times.length - 1], 1);
+
+      ctx.strokeStyle = '#21262d';
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '11px monospace';
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + (ch * i) / 4;
+        const val = maxP - (spanP * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(w - pad.right, y);
+        ctx.stroke();
+        ctx.fillText(val.toFixed(2), w - pad.right + 6, y + 4);
+      }
+
+      ctx.strokeStyle = '#58a6ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      history.forEach(([t, p], idx) => {
+        const x = pad.left + (t / maxT) * cw;
+        const y = pad.top + ((maxP - p) / spanP) * ch;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    function drawCandles(candles) {
+      const canvas = document.getElementById('chart');
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      if (!candles || candles.length === 0) return;
+
+      const pad = { top: 12, right: 56, bottom: 24, left: 12 };
+      const cw = w - pad.left - pad.right;
+      const ch = h - pad.top - pad.bottom;
+      const priceH = ch * 0.76;
+      const volTop = pad.top + ch * 0.80;
+      const volH = ch * 0.20;
+
+      const highs = candles.map(c => c.high);
+      const lows = candles.map(c => c.low);
+      const [minP, maxP] = smoothRange(Math.min(...lows) - 0.5, Math.max(...highs) + 0.5);
+      const spanP = maxP - minP || 1;
+      const maxVol = Math.max(...candles.map(c => c.volume), 1);
+
+      ctx.strokeStyle = '#21262d';
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '11px monospace';
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + (priceH * i) / 4;
+        const val = maxP - (spanP * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(w - pad.right, y);
+        ctx.stroke();
+        ctx.fillText(val.toFixed(2), w - pad.right + 6, y + 4);
+      }
+
+      const slotW = cw / candles.length;
+      const bodyW = Math.max(1, Math.min(24, slotW * 0.65));
+
+      candles.forEach((c, i) => {
+        const cx = pad.left + (i + 0.5) * slotW;
+        const yHigh = pad.top + ((maxP - c.high) / spanP) * priceH;
+        const yLow = pad.top + ((maxP - c.low) / spanP) * priceH;
+        const yOpen = pad.top + ((maxP - c.open) / spanP) * priceH;
+        const yClose = pad.top + ((maxP - c.close) / spanP) * priceH;
+        const bullish = c.close >= c.open;
+        const color = bullish ? '#3fb950' : '#f85149';
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(cx, yHigh);
+        ctx.lineTo(cx, yLow);
+        ctx.stroke();
+
+        ctx.fillStyle = color;
+        const top = Math.min(yOpen, yClose);
+        const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
+        ctx.fillRect(cx - bodyW / 2, top, bodyW, bodyH);
+
+        const vh = (c.volume / maxVol) * volH;
+        ctx.fillStyle = bullish ? 'rgba(63,185,80,0.35)' : 'rgba(248,81,73,0.35)';
+        ctx.fillRect(cx - bodyW / 2, volTop + volH - vh, bodyW, vh);
+
+        if (candles.length <= 12 || i % Math.ceil(candles.length / 8) === 0) {
+          ctx.fillStyle = '#8b949e';
+          ctx.fillText(fmtTime(c.time), cx - 12, h - 6);
+        }
+      });
+
+      const activeIdx = hoverIdx >= 0 && hoverIdx < candles.length ? hoverIdx : candles.length - 1;
+      const ac = candles[activeIdx];
+      document.getElementById('ohlc-bar').textContent =
+        `[${fmtTime(ac.time)}]  O: ${ac.open.toFixed(2)}   H: ${ac.high.toFixed(2)}   L: ${ac.low.toFixed(2)}   C: ${ac.close.toFixed(2)}   Vol: ${ac.volume}`;
+
+      if (hoverIdx >= 0 && hoverIdx < candles.length) {
+        const hx = pad.left + (hoverIdx + 0.5) * slotW;
+        ctx.strokeStyle = 'rgba(139,148,158,0.4)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(hx, pad.top);
+        ctx.lineTo(hx, pad.top + ch);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    function renderChart(data) {
+      if (chartMode === 'candle') drawCandles(data.candles);
+      else drawLineChart(data.history);
+    }
+
+    let bookMode = 'table';
+    function setBookMode(mode) {
+      bookMode = mode;
+      document.getElementById('tab-book-table').classList.toggle('active', mode === 'table');
+      document.getElementById('tab-book-hist').classList.toggle('active', mode === 'hist');
+      document.getElementById('book-table-view').style.display = mode === 'table' ? 'block' : 'none';
+      document.getElementById('book-hist-view').style.display = mode === 'hist' ? 'block' : 'none';
+      if (lastData && mode === 'hist') drawBookHistogram(lastData);
+    }
+
+    function drawBookHistogram(data) {
+      const canvas = document.getElementById('book-hist');
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (w === 0 || h === 0) return;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const allBids = data.all_bids || [];
+      const allAsks = data.all_asks || [];
+      const allPrices = allBids.map(b => b[0]).concat(allAsks.map(a => a[0]));
+      if (allPrices.length === 0) return;
+
+      const minP = Math.min(...allPrices);
+      const maxP = Math.max(...allPrices);
+      const span = Math.max(maxP - minP, 1.0);
+      const bins = 24;
+      const bidBins = new Array(bins).fill(0);
+      const askBins = new Array(bins).fill(0);
+
+      allBids.forEach(([p, q]) => {
+        const idx = Math.min(bins - 1, Math.floor(((p - minP) / span) * bins));
+        bidBins[idx] += q;
+      });
+      allAsks.forEach(([p, q]) => {
+        const idx = Math.min(bins - 1, Math.floor(((p - minP) / span) * bins));
+        askBins[idx] += q;
+      });
+
+      const maxQty = Math.max(...bidBins, ...askBins, 1);
+      const pad = { top: 14, right: 12, bottom: 24, left: 36 };
+      const cw = w - pad.left - pad.right;
+      const ch = h - pad.top - pad.bottom;
+      const slotW = cw / bins;
+
+      ctx.strokeStyle = '#21262d';
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '10px monospace';
+      for (let i = 0; i <= 3; i++) {
+        const y = pad.top + (ch * i) / 3;
+        const v = Math.round(maxQty * (1 - i / 3));
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(w - pad.right, y);
+        ctx.stroke();
+        ctx.fillText(String(v), 4, y + 3);
+      }
+
+      for (let i = 0; i < bins; i++) {
+        const x = pad.left + i * slotW + 1;
+        const bw = Math.max(2, slotW - 2);
+        if (bidBins[i] > 0) {
+          const bh = (bidBins[i] / maxQty) * ch;
+          ctx.fillStyle = 'rgba(63,185,80,0.8)';
+          ctx.fillRect(x, pad.top + ch - bh, bw, bh);
+        }
+        if (askBins[i] > 0) {
+          const ah = (askBins[i] / maxQty) * ch;
+          ctx.fillStyle = 'rgba(248,81,73,0.8)';
+          ctx.fillRect(x, pad.top + ch - ah, bw, ah);
+        }
+      }
+
+      const lastX = pad.left + Math.max(0, Math.min(1, (data.price - minP) / span)) * cw;
+      ctx.strokeStyle = '#58a6ff';
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(lastX, pad.top);
+      ctx.lineTo(lastX, pad.top + ch);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText(minP.toFixed(1), pad.left, h - 6);
+      ctx.fillText(data.price.toFixed(1), Math.min(w - 36, Math.max(pad.left + 20, lastX - 12)), h - 6);
+      ctx.fillText(maxP.toFixed(1), w - pad.right - 30, h - 6);
+    }
+
+    document.getElementById('chart').addEventListener('mousemove', (e) => {
+      if (chartMode !== 'candle' || !lastData || !lastData.candles.length) return;
+      const rect = e.target.getBoundingClientRect();
+      const x = e.clientX - rect.left - 12;
+      const cw = rect.width - 12 - 56;
+      const idx = Math.floor((x / cw) * lastData.candles.length);
+      hoverIdx = idx >= 0 && idx < lastData.candles.length ? idx : -1;
+      drawCandles(lastData.candles);
+    });
+
+    document.getElementById('chart').addEventListener('mouseleave', () => {
+      if (hoverIdx !== -1) {
+        hoverIdx = -1;
+        if (lastData && chartMode === 'candle') drawCandles(lastData.candles);
+      }
+    });
+
+    document.addEventListener('mousedown', (e) => {
+      const btn = e.target.closest('button[data-cancel-id]');
+      if (btn) {
+        e.preventDefault();
+        cancelOrder(Number(btn.dataset.cancelId));
+      }
+    });
+
+    const _htmlCache = {};
+    function setHtml(id, html) {
+      if (_htmlCache[id] !== html) {
+        _htmlCache[id] = html;
+        document.getElementById(id).innerHTML = html;
+      }
+    }
+
+    function applyState(data) {
+      lastData = data;
+      isRunning = data.running;
+      document.getElementById('toggle-btn').textContent = isRunning ? 'Pause' : 'Start';
+      document.getElementById('symbol').textContent = data.symbol;
+      document.getElementById('price').textContent = `$${data.price.toFixed(2)}`;
+      document.getElementById('sim-time').textContent =
+        data.duration !== null ? `Time: ${data.time.toFixed(1)}s / ${data.duration}s` : `Time: ${data.time.toFixed(1)}s`;
+      document.getElementById('tx-count').textContent = `Trades: ${data.tx_count}`;
+      document.getElementById('player-count').textContent = `Players: ${data.player_count}`;
+      const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
+      document.getElementById('players-heading').textContent =
+        `Top Players (Total: ${data.player_count} | Bull: ${pb.bull} | Bear: ${pb.bear} | Both: ${pb.both})`;
+      document.getElementById('mid-price').textContent = `Last: $${data.price.toFixed(2)}`;
+      document.getElementById('book-totals').textContent =
+        `Asks Total: ${data.total_ask_qty} shares | Bids Total: ${data.total_bid_qty} shares`;
+      const totalBook = data.total_bid_qty + data.total_ask_qty;
+      const bidPct = totalBook > 0 ? (data.total_bid_qty / totalBook) * 100 : 50;
+      const askPct = 100 - bidPct;
+      document.getElementById('bid-pct-lbl').textContent = `Bid ${bidPct.toFixed(1)}%`;
+      document.getElementById('ask-pct-lbl').textContent = `Ask ${askPct.toFixed(1)}%`;
+      document.getElementById('ratio-bid').style.width = `${bidPct}%`;
+      document.getElementById('ratio-ask').style.width = `${askPct}%`;
+      const pnl = data.you.pnl;
+      const pnlPct = data.you.pnl_pct;
+      const pnlSign = pnl >= 0 ? '+' : '-';
+      const pnlCls = pnl >= 0 ? 'bid' : 'ask';
+      document.getElementById('you-info').innerHTML =
+        `YOU: $${data.you.cash.toFixed(2)} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
+
+      setHtml('asks-body', data.asks
+        .map(a => `<tr class="ask"><td>Ask${a.is_you ? ' (YOU)' : ''}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${a.id}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .join(''));
+      setHtml('bids-body', data.bids
+        .map(b => `<tr class="bid"><td>Bid${b.is_you ? ' (YOU)' : ''}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${b.id}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .join(''));
+      setHtml('your-orders', data.your_orders.length
+        ? 'Open Orders: ' + data.your_orders.map(o =>
+            `${o.side.toUpperCase()} ${o.amount}@${o.price.toFixed(2)} <button data-cancel-id="${o.id}" style="padding:1px 5px;font-size:11px;">Cancel</button>`
+          ).join(' ')
+        : '');
+      document.getElementById('tx-body').innerHTML = data.transactions
+        .map(tx => `<tr><td>#${tx.id}</td><td>${tx.time.toFixed(2)}s</td><td>${tx.price.toFixed(2)}</td><td>${tx.qty}</td><td>${tx.buyer_id}</td><td>${tx.seller_id}</td></tr>`)
+        .join('');
+      document.getElementById('lb-body').innerHTML = data.leaderboard
+        .map(p => `<tr><td>P${p.id}</td><td>${p.strategy}</td><td>${p.target.toFixed(2)}</td><td>${p.eps.toFixed(2)}</td><td>${p.cash.toFixed(2)}</td><td>${p.qty}</td><td>${p.value.toFixed(2)}</td></tr>`)
+        .join('');
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch(`/api/state?interval=${candleInterval}`);
+        applyState(await res.json());
+      } catch (e) {}
+    }
+
+    let ws = null;
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws?interval=${candleInterval}`);
+      ws.onmessage = (e) => applyState(JSON.parse(e.data));
+      ws.onclose = () => setTimeout(connectWS, 1000);
+    }
+
+    function animate() {
+      if (lastData) {
+        renderChart(lastData);
+        if (bookMode === 'hist') drawBookHistogram(lastData);
+      }
+      requestAnimationFrame(animate);
+    }
+
+    connectWS();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

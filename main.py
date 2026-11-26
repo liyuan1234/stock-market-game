@@ -83,7 +83,7 @@ class exchange:
 
 
 class Player:
-    def __init__(self, id=None, cash=10000.0, stock=None, epsilon=None, strategy=None):
+    def __init__(self, id=None, cash=1000000.0, stock=None, epsilon=None, strategy=None):
         self.id = id
         self.cash = cash
         self.stock = [dict(item) for item in stock] if stock else []  # list of {"name": str, "qty": int}
