@@ -57,16 +57,12 @@ class LiveSimulation:
                 Player(id=i + 1, stock=[{"name": self.stock.name, "qty": init_shares}])
                 for i in range(self.n)
             ]
-            self.manual_player = Player(
-                id="YOU", stock=[{"name": self.stock.name, "qty": init_shares}]
-            )
-            self.you_cost_basis = self.manual_player.cash + init_shares * self.stock.price
             self.next_times = [
                 self.t + random.expovariate(max(p.epsilon, 0.05) * 2)
                 for p in self.players
             ]
-            self.market.bids.clear()
-            self.market.asks.clear()
+            self.market.bids = [b for b in self.market.bids if b["player"] is self.manual_player]
+            self.market.asks = [a for a in self.market.asks if a["player"] is self.manual_player]
             return self.n
 
     def step(self, dt=0.25):
@@ -128,9 +124,13 @@ class LiveSimulation:
 
     def add_players(self, count=10, bias="random"):
         with self.lock:
+            max_players = _SIM_CFG.get("max_players", 5000)
+            allowed = max(0, max_players - len(self.players))
+            count = min(count, allowed)
             if count <= 0:
                 return self.n
             curr = self.stock.price
+            init_shares = _PLAYER_CFG.get("initial_shares", 50)
             start_id = len(self.players) + 1
             for i in range(count):
                 if bias == "bull":
@@ -150,7 +150,7 @@ class LiveSimulation:
                     }
                 p = Player(
                     id=start_id + i,
-                    stock=[{"name": self.stock.name, "qty": 50}],
+                    stock=[{"name": self.stock.name, "qty": init_shares}],
                     strategy=strategy,
                 )
                 self.players.append(p)

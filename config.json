@@ -10,11 +10,12 @@
         "price_spread": 2.0,
         "min_order_qty": 1,
         "max_order_qty": 10,
-    "target_price_range": 5.0,
+        "target_price_range": 5.0,
         "allow_short_selling": true
     },
     "simulation": {
         "initial_players": 50,
+        "max_players": 5000,
         "duration": null,
         "tick_dt": 0.05
     },
