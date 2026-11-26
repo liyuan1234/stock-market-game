@@ -383,7 +383,8 @@
       <div class="stats">
         <span class="meta" id="sim-time">Time: 0.0s</span>
         <span class="meta" id="tx-count">Trades: 0</span>
-        <span class="meta" id="player-count">Players: 50</span>
+        <span class="meta" id="online-info" style="color:var(--green);font-weight:600;">Online: 1</span>
+        <span class="meta" id="player-count">Bots: 50</span>
         <span class="meta" id="mcap-info">Shares: 1,000</span>
       </div>
       <div class="controls">
@@ -615,14 +616,41 @@
       return [smoothMinP, smoothMaxP];
     }
 
+    const TOKEN_KEY = 'market_session_token';
+
+    function authHeaders(extra = {}) {
+      const tok = sessionStorage.getItem(TOKEN_KEY);
+      return tok ? { ...extra, 'X-Session-Token': tok } : { ...extra };
+    }
+
+    function redirectToLogin() {
+      sessionStorage.removeItem(TOKEN_KEY);
+      window.location.href = '/login';
+    }
+
+    async function ensureTabSessionToken() {
+      if (sessionStorage.getItem(TOKEN_KEY)) return;
+      try {
+        const res = await fetch('/api/session');
+        if (res.status === 401) {
+          redirectToLogin();
+          return;
+        }
+        const info = await res.json();
+        if (info && info.token) {
+          sessionStorage.setItem(TOKEN_KEY, info.token);
+        }
+      } catch (e) {}
+    }
+
     async function postAction(url, body = {}) {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
       });
       if (res.status === 401) {
-        window.location.href = '/login';
+        redirectToLogin();
         return { ok: false, message: 'Session expired.' };
       }
       const data = await res.json().catch(() => ({}));
@@ -809,8 +837,8 @@
     }
 
     async function logout() {
-      await postAction('/api/logout');
-      window.location.href = '/login';
+      await fetch('/api/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+      redirectToLogin();
     }
 
     async function cancelOrder(orderId) {
@@ -1031,7 +1059,6 @@
     let lastMyTxVersion = -1;
     let myTxFetching = false;
     let pendingMyTxReload = false;
-    loadMyTransactions();
 
     function setTxMode(mode) {
       txMode = mode;
@@ -1090,9 +1117,9 @@
       }
       myTxFetching = true;
       try {
-        const res = await fetch('/api/my_transactions');
+        const res = await fetch('/api/my_transactions', { headers: authHeaders() });
         if (res.status === 401) {
-          window.location.href = '/login';
+          redirectToLogin();
           return;
         }
         const payload = await res.json();
@@ -1234,7 +1261,14 @@
       document.getElementById('sim-time').textContent =
         data.duration !== null ? `Time: ${data.time.toFixed(1)}s / ${data.duration}s` : `Time: ${data.time.toFixed(1)}s`;
       document.getElementById('tx-count').textContent = `Trades: ${data.tx_count}`;
-      document.getElementById('player-count').textContent = `Players: ${data.player_count}`;
+      const onlineUsers = Array.isArray(data.online_users) ? data.online_users : [];
+      const onlineCount = data.online_count ?? onlineUsers.length;
+      const onlineEl = document.getElementById('online-info');
+      onlineEl.textContent = onlineUsers.length > 0 && onlineUsers.length <= 4
+        ? `Online (${onlineCount}): ${onlineUsers.join(', ')}`
+        : `Online: ${onlineCount}`;
+      onlineEl.title = onlineUsers.length ? `Connected traders: ${onlineUsers.join(', ')}` : '';
+      document.getElementById('player-count').textContent = `Bots: ${data.player_count}`;
       if (data.total_shares !== undefined) {
         document.getElementById('mcap-info').textContent =
           `Shares: ${Number(data.total_shares).toLocaleString()} | MCap: $${Number(data.market_cap || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
@@ -1243,8 +1277,9 @@
       document.getElementById('add-n').disabled = !canAddBots;
       document.getElementById('add-bias').disabled = !canAddBots;
       const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
+      const humanCount = data.human_count ?? 0;
       document.getElementById('players-heading').textContent =
-        `Top Players (Total: ${data.player_count} | Bull: ${pb.bull} | Bear: ${pb.bear} | Both: ${pb.both})`;
+        `Top Players (Humans: ${humanCount} | Bots: ${data.player_count} — Bull: ${pb.bull}, Bear: ${pb.bear}, Both: ${pb.both})`;
       document.getElementById('mid-price').textContent = `Last: $${data.price.toFixed(2)}`;
       document.getElementById('book-totals').textContent =
         `Asks Total: ${data.total_ask_qty} shares | Bids Total: ${data.total_bid_qty} shares`;
@@ -1267,10 +1302,16 @@
         `${safeUser}: $${data.you.cash.toFixed(2)}${availInfo} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
 
       setHtml('asks-body', data.asks
-        .map(a => `<tr class="ask"><td>Ask${a.is_you ? ' (YOU)' : ''}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${Number(a.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .map(a => {
+          const tag = a.is_you ? ' (YOU)' : (a.trader ? ` (${escHtml(a.trader)})` : '');
+          return `<tr class="ask"><td>Ask${tag}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${Number(a.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`;
+        })
         .join(''));
       setHtml('bids-body', data.bids
-        .map(b => `<tr class="bid"><td>Bid${b.is_you ? ' (YOU)' : ''}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${Number(b.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`)
+        .map(b => {
+          const tag = b.is_you ? ' (YOU)' : (b.trader ? ` (${escHtml(b.trader)})` : '');
+          return `<tr class="bid"><td>Bid${tag}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${Number(b.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`;
+        })
         .join(''));
       setHtml('your-orders', data.your_orders.length
         ? 'Open Orders: ' + data.your_orders.map(o =>
@@ -1286,8 +1327,15 @@
       }
       setHtml('lb-body', data.leaderboard
         .map(p => {
-          const name = p.is_you ? `${escHtml(p.id)} (YOU)` : `P${escHtml(p.id)}`;
-          const rowStyle = p.is_you ? ' style="background:rgba(88,166,255,0.12);font-weight:600;"' : '';
+          const isHuman = p.is_bot === false || p.strategy === 'manual';
+          const rankPrefix = p.rank ? `#${Number(p.rank)} ` : '';
+          const onlineDot = isHuman && p.is_online ? '<span style="color:var(--green);margin-left:4px;" title="Online">●</span>' : '';
+          const name = p.is_you
+            ? `${rankPrefix}${escHtml(p.id)} (YOU)${onlineDot}`
+            : (isHuman ? `${rankPrefix}${escHtml(p.id)}${onlineDot}` : `${rankPrefix}P${escHtml(p.id)}`);
+          const rowStyle = p.is_you
+            ? ' style="background:rgba(88,166,255,0.14);font-weight:600;"'
+            : (isHuman ? ' style="background:rgba(63,185,80,0.08);"' : '');
           const targetStr = p.target !== null && p.target !== undefined ? Number(p.target).toFixed(2) : '—';
           const epsStr = p.eps !== null && p.eps !== undefined ? Number(p.eps).toFixed(2) : '—';
           const pl = Number(p.pnl || 0);
@@ -1300,9 +1348,9 @@
 
     async function refresh() {
       try {
-        const res = await fetch(`/api/state?interval=${candleInterval}`);
+        const res = await fetch(`/api/state?interval=${candleInterval}`, { headers: authHeaders() });
         if (res.status === 401) {
-          window.location.href = '/login';
+          redirectToLogin();
           return;
         }
         applyState(await res.json());
@@ -1312,11 +1360,13 @@
     let ws = null;
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${proto}//${location.host}/ws?interval=${candleInterval}`);
+      const tok = sessionStorage.getItem(TOKEN_KEY);
+      const tokParam = tok ? `&token=${encodeURIComponent(tok)}` : '';
+      ws = new WebSocket(`${proto}//${location.host}/ws?interval=${candleInterval}${tokParam}`);
       ws.onmessage = (e) => applyState(JSON.parse(e.data));
       ws.onclose = (ev) => {
         if (ev.code === 1008) {
-          window.location.href = '/login';
+          redirectToLogin();
           return;
         }
         setTimeout(connectWS, 1000);
@@ -1332,8 +1382,12 @@
       requestAnimationFrame(animate);
     }
 
-    connectWS();
-    requestAnimationFrame(animate);
+    (async function boot() {
+      await ensureTabSessionToken();
+      loadMyTransactions();
+      connectWS();
+      requestAnimationFrame(animate);
+    })();
   </script>
 </body>
 

@@ -51,6 +51,24 @@
     <div class="err" id="err-msg"></div>
   </div>
   <script>
+    const TOKEN_KEY = 'market_session_token';
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('next') === '1') {
+      const savedToken = sessionStorage.getItem(TOKEN_KEY);
+      if (savedToken) {
+        fetch('/api/session', { headers: { 'X-Session-Token': savedToken } })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((info) => {
+            if (info && info.ok) {
+              window.location.replace('/');
+            } else {
+              sessionStorage.removeItem(TOKEN_KEY);
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
     document.getElementById('login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const username = document.getElementById('username').value.trim();
@@ -72,6 +90,9 @@
       if (!res.ok) {
         errEl.textContent = data.message || 'Login failed.';
         return;
+      }
+      if (data.token) {
+        sessionStorage.setItem(TOKEN_KEY, data.token);
       }
       window.location.href = '/';
     });

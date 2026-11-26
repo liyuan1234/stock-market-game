@@ -11,7 +11,7 @@ import secrets
 import threading
 import time
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 import uvicorn
@@ -85,6 +85,11 @@ class LiveSimulation:
         self.speed = 1.0
         self.user_sessions: dict[int, dict] = {}
         self._player_to_uid: dict[Player, int] = {}
+        self._ws_counts: dict[int, int] = defaultdict(int)
+        self._state_version = 0
+        self._shared_cache_ver = -1
+        self._shared_cache: dict | None = None
+        self._candle_cache: dict[tuple[int, int], list[dict]] = {}
         self._heap: list[tuple[float, int, Player]] = []
         self._heap_seq = 0
         self._candle_buckets: dict[int, dict[int, dict]] = {}
@@ -258,7 +263,22 @@ class LiveSimulation:
 
             total_issued = self.n * bot_shares + len(self.user_sessions) * player_shares
             self.stock.numberOfStock = max(self.stock.numberOfStock, total_issued)
+            self._state_version += 1
         self._flush_db()
+
+    def connect_ws(self, user_id: int):
+        with self.lock:
+            self._ws_counts[user_id] = self._ws_counts.get(user_id, 0) + 1
+            self._state_version += 1
+
+    def disconnect_ws(self, user_id: int):
+        with self.lock:
+            cur = self._ws_counts.get(user_id, 0)
+            if cur <= 1:
+                self._ws_counts.pop(user_id, None)
+            else:
+                self._ws_counts[user_id] = cur - 1
+            self._state_version += 1
 
     def reset_players(self):
         with self.lock:
@@ -278,6 +298,7 @@ class LiveSimulation:
             for p in self.players:
                 self._schedule_bot(p, self.t)
             self._next_bot_id = self.n + 1
+            self._state_version += 1
             return self.n
 
     def step(self, dt=0.25):
@@ -307,17 +328,19 @@ class LiveSimulation:
             if self.duration is not None and self.t >= self.duration:
                 self.market.history[self.stock.name].append((self.duration, self.stock.price))
                 self.running = False
+            self._state_version += 1
         self._flush_db()
 
     def login_or_restore_user(self, username: str, initial_cash: float) -> dict:
         with self.lock:
             init_shares = _PLAYER_CFG.get("initial_shares", 0)
-            user = create_user(
-                username=username,
-                initial_cash=initial_cash,
-                initial_shares=init_shares,
-                stock_price=self.stock.price,
-            )
+            with self._db_lock:
+                user = create_user(
+                    username=username,
+                    initial_cash=initial_cash,
+                    initial_shares=init_shares,
+                    stock_price=self.stock.price,
+                )
             uid = user["id"]
             if uid not in self.user_sessions:
                 p = Player(
@@ -336,6 +359,9 @@ class LiveSimulation:
                     "orders_version": 1,
                 }
                 self._player_to_uid[p] = uid
+                if init_shares > 0:
+                    self.stock.numberOfStock += init_shares
+                self._state_version += 1
             return user
 
     def ensure_user_session(self, user_id: int) -> dict | None:
@@ -343,7 +369,8 @@ class LiveSimulation:
             sess = self.user_sessions.get(user_id)
             if sess is not None:
                 return sess
-            user = get_user(user_id)
+            with self._db_lock:
+                user = get_user(user_id)
             if user is None:
                 return None
             init_shares = _PLAYER_CFG.get("initial_shares", 0)
@@ -371,6 +398,7 @@ class LiveSimulation:
             }
             self.user_sessions[user_id] = sess
             self._player_to_uid[p] = user_id
+            self._state_version += 1
             return sess
 
     def submit_manual_order(self, user_id: int, side: str, price: float | None, amount: int, order_type: str = "limit"):
@@ -486,6 +514,7 @@ class LiveSimulation:
                         msg = f"{side.capitalize()} limit filling dynamically ({filled}/{amount} filled so far @ ${avg_exec:.2f})."
                     else:
                         msg = f"{side.capitalize()} limit filled {filled}/{amount} @ ${avg_exec:.2f}."
+            self._state_version += 1
 
         self._flush_db()
         return True, msg
@@ -504,6 +533,7 @@ class LiveSimulation:
             shares_now = player.get_qty(self.stock)
             cb_now = sess["cost_basis"]
             uname = sess["username"]
+            self._state_version += 1
         with self._db_lock:
             save_user_state(user_id, cash=cash_now, shares=shares_now, cost_basis=cb_now)
         return True, cash_now, f"Added ${amount:,.0f} to {uname}."
@@ -514,6 +544,8 @@ class LiveSimulation:
             if sess is None:
                 return False, "User session not found."
             ok, _ = self.market.cancel_order(order_id, player=sess["player"])
+            if ok:
+                self._state_version += 1
         self._flush_db()
         if ok:
             return True, f"Cancelled order #{order_id}."
@@ -566,6 +598,7 @@ class LiveSimulation:
             if overflow < count:
                 self.stock.numberOfStock += (count - max(0, overflow)) * bot_shares
             self.n = len(self.players)
+            self._state_version += 1
             return True, self.n, f"Added {count} {bias} players."
 
     def inject_cash(self, amount):
@@ -578,13 +611,10 @@ class LiveSimulation:
                 up = sess["player"]
                 up.cash = round(up.cash + amount, 2)
                 sess["cost_basis"] = round(sess["cost_basis"] + amount, 2)
-                save_user_state(
-                    uid,
-                    cash=up.cash,
-                    shares=up.get_qty(self.stock),
-                    cost_basis=sess["cost_basis"],
-                )
-            return True, f"Injected ${amount:,.2f} to all players."
+                self._dirty_users[uid] = (up.cash, up.get_qty(self.stock), sess["cost_basis"])
+            self._state_version += 1
+        self._flush_db()
+        return True, f"Injected ${amount:,.2f} to all players."
 
     def inject_stock(self, qty=10):
         with self.lock:
@@ -596,15 +626,12 @@ class LiveSimulation:
                 up = sess["player"]
                 up.add_stock(self.stock, qty)
                 sess["cost_basis"] = round(sess["cost_basis"] + qty * self.stock.price, 2)
-                save_user_state(
-                    uid,
-                    cash=up.cash,
-                    shares=up.get_qty(self.stock),
-                    cost_basis=sess["cost_basis"],
-                )
+                self._dirty_users[uid] = (up.cash, up.get_qty(self.stock), sess["cost_basis"])
             total_recipients = len(self.players) + len(self.user_sessions)
             self.stock.numberOfStock += qty * total_recipients
-            return True, f"Added {qty} {self.stock.name} shares to all players."
+            self._state_version += 1
+        self._flush_db()
+        return True, f"Added {qty} {self.stock.name} shares to all players."
 
     def _build_candles(self, interval=60.0):
         iv_int = int(round(max(1.0, float(interval))))
@@ -653,6 +680,134 @@ class LiveSimulation:
             })
         return candles
 
+    def _get_shared_snapshot(self) -> dict:
+        if self._shared_cache_ver == self._state_version and self._shared_cache is not None:
+            return self._shared_cache
+
+        price = self.stock.price
+        top_asks = [
+            {
+                "id": a["id"],
+                "price": a["price"],
+                "amount": a["amount"],
+                "player": a["player"],
+                "trader": a["player"].id if (a["player"] is not None and not a["player"].is_bot) else None,
+            }
+            for a in self.market.asks[:10]
+        ]
+        top_bids = [
+            {
+                "id": b["id"],
+                "price": b["price"],
+                "amount": b["amount"],
+                "player": b["player"],
+                "trader": b["player"].id if (b["player"] is not None and not b["player"].is_bot) else None,
+            }
+            for b in self.market.bids[:10]
+        ]
+        total_ask_qty = sum(a["amount"] for a in self.market.asks)
+        total_bid_qty = sum(b["amount"] for b in self.market.bids)
+
+        ask_levels = defaultdict(int)
+        for a in self.market.asks:
+            ask_levels[a["price"]] += a["amount"]
+        bid_levels = defaultdict(int)
+        for b in self.market.bids:
+            bid_levels[b["price"]] += b["amount"]
+
+        txs = list(reversed(self.market.transactions[-15:]))
+        history = self.market.history.get(self.stock.name, [])
+        if len(history) > 500:
+            stride = max(1, (len(history) - 1) // 500)
+            sampled = history[:-1:stride]
+            history = sampled + [history[-1]]
+
+        leaderboard_raw = []
+        breakdown = {"bull": 0, "bear": 0, "both": 0}
+        bot_init_basis = (
+            _BOT_CFG.get("initial_cash", 1000000.0)
+            + _BOT_CFG.get("initial_shares", 50) * CFG.get("stock", {}).get("initial_price", 100.0)
+        )
+        for p in self.players:
+            stype = p.strategy["type"]
+            if stype == "buy_below":
+                breakdown["bull"] += 1
+            elif stype == "sell_above":
+                breakdown["bear"] += 1
+            else:
+                breakdown["both"] += 1
+            qty = p.get_qty(self.stock)
+            val = round(p.cash + qty * price, 2)
+            leaderboard_raw.append({
+                "uid": None,
+                "id": p.id,
+                "is_bot": True,
+                "is_online": False,
+                "strategy": stype,
+                "target": p.strategy["target_price"],
+                "eps": round(p.epsilon, 2),
+                "cash": round(p.cash, 2),
+                "qty": qty,
+                "value": val,
+                "pnl": round(val - bot_init_basis, 2),
+            })
+
+        online_users = []
+        for uid, u_sess in self.user_sessions.items():
+            up = u_sess["player"]
+            u_qty = up.get_qty(self.stock)
+            u_cash = round(up.cash, 2)
+            u_val = round(up.cash + u_qty * price, 2)
+            u_basis = u_sess["cost_basis"]
+            u_pnl = round(u_val - u_basis, 2)
+            is_online = self._ws_counts.get(uid, 0) > 0
+            if is_online:
+                online_users.append(u_sess["username"])
+            leaderboard_raw.append({
+                "uid": uid,
+                "id": u_sess["username"],
+                "is_bot": False,
+                "is_online": is_online,
+                "strategy": "manual",
+                "target": None,
+                "eps": None,
+                "cash": u_cash,
+                "qty": u_qty,
+                "value": u_val,
+                "pnl": u_pnl,
+            })
+
+        leaderboard_raw.sort(key=lambda x: (-x["pnl"], 0 if not x["is_bot"] else 1, str(x["id"])))
+        for idx, entry in enumerate(leaderboard_raw, start=1):
+            entry["rank"] = idx
+
+        self._candle_cache.clear()
+        self._shared_cache = {
+            "price": price,
+            "top_asks": top_asks,
+            "top_bids": top_bids,
+            "total_ask_qty": total_ask_qty,
+            "total_bid_qty": total_bid_qty,
+            "all_asks": [[p, q] for p, q in list(ask_levels.items())[:200]],
+            "all_bids": [[p, q] for p, q in list(bid_levels.items())[:200]],
+            "txs": txs,
+            "history": history,
+            "breakdown": breakdown,
+            "leaderboard_raw": leaderboard_raw,
+            "online_users": online_users,
+        }
+        self._shared_cache_ver = self._state_version
+        return self._shared_cache
+
+    def _get_cached_candles(self, interval=60.0) -> list[dict]:
+        iv_int = int(round(max(1.0, float(interval))))
+        key = (self._state_version, iv_int)
+        cached = self._candle_cache.get(key)
+        if cached is None:
+            cached = self._build_candles(interval=iv_int)
+            self._candle_cache[key] = cached
+        return cached
+
     def get_state(self, user_id: int | None = None, interval=60.0):
         with self.lock:
             sess = self.ensure_user_session(user_id) if user_id is not None else None
@@ -660,15 +815,19 @@ class LiveSimulation:
             username = sess["username"] if sess else "YOU"
             cost_basis = sess["cost_basis"] if sess else 0.0
 
-            price = self.stock.price
+            shared = self._get_shared_snapshot()
+            price = shared["price"]
+            candles = self._get_cached_candles(interval=interval)
+
             asks = [
                 {
                     "id": a["id"],
                     "price": a["price"],
                     "amount": a["amount"],
                     "is_you": manual_player is not None and a["player"] is manual_player,
+                    "trader": a["trader"],
                 }
-                for a in self.market.asks[:10]
+                for a in shared["top_asks"]
             ]
             bids = [
                 {
@@ -676,18 +835,10 @@ class LiveSimulation:
                     "price": b["price"],
                     "amount": b["amount"],
                     "is_you": manual_player is not None and b["player"] is manual_player,
+                    "trader": b["trader"],
                 }
-                for b in self.market.bids[:10]
+                for b in shared["top_bids"]
             ]
-            total_ask_qty = sum(a["amount"] for a in self.market.asks)
-            total_bid_qty = sum(b["amount"] for b in self.market.bids)
-
-            ask_levels = defaultdict(int)
-            for a in self.market.asks:
-                ask_levels[a["price"]] += a["amount"]
-            bid_levels = defaultdict(int)
-            for b in self.market.bids:
-                bid_levels[b["price"]] += b["amount"]
 
             your_orders = []
             if manual_player is not None:
@@ -714,42 +865,6 @@ class LiveSimulation:
                     ]
                 )
 
-            txs = list(reversed(self.market.transactions[-15:]))
-            history = self.market.history.get(self.stock.name, [])
-            if len(history) > 500:
-                stride = max(1, (len(history) - 1) // 500)
-                sampled = history[:-1:stride]
-                history = sampled + [history[-1]]
-            candles = self._build_candles(interval=interval)
-
-            leaderboard = []
-            breakdown = {"bull": 0, "bear": 0, "both": 0}
-            bot_init_basis = (
-                _BOT_CFG.get("initial_cash", 1000000.0)
-                + _BOT_CFG.get("initial_shares", 50) * CFG.get("stock", {}).get("initial_price", 100.0)
-            )
-            for p in self.players:
-                stype = p.strategy["type"]
-                if stype == "buy_below":
-                    breakdown["bull"] += 1
-                elif stype == "sell_above":
-                    breakdown["bear"] += 1
-                else:
-                    breakdown["both"] += 1
-                qty = p.get_qty(self.stock)
-                val = round(p.cash + qty * price, 2)
-                leaderboard.append({
-                    "id": p.id,
-                    "is_you": False,
-                    "strategy": stype,
-                    "target": p.strategy["target_price"],
-                    "eps": round(p.epsilon, 2),
-                    "cash": round(p.cash, 2),
-                    "qty": qty,
-                    "value": val,
-                    "pnl": round(val - bot_init_basis, 2),
-                })
-
             if manual_player is not None:
                 you_qty = manual_player.get_qty(self.stock)
                 you_cash = round(manual_player.cash, 2)
@@ -758,17 +873,6 @@ class LiveSimulation:
                 you_val = round(manual_player.cash + you_qty * price, 2)
                 you_pnl = round(you_val - cost_basis, 2)
                 you_pnl_pct = round((you_pnl / cost_basis) * 100, 2) if cost_basis else 0.0
-                leaderboard.append({
-                    "id": sess["username"],
-                    "is_you": True,
-                    "strategy": "manual",
-                    "target": None,
-                    "eps": None,
-                    "cash": you_cash,
-                    "qty": you_qty,
-                    "value": you_val,
-                    "pnl": you_pnl,
-                })
             else:
                 you_qty = 0
                 you_cash = 0.0
@@ -778,7 +882,35 @@ class LiveSimulation:
                 you_pnl = 0.0
                 you_pnl_pct = 0.0
 
-            leaderboard.sort(key=lambda x: -x["pnl"])
+            # Include top 10 overall plus all active/online human traders so concurrent users always see each other
+            selected_rows = []
+            seen_ranks = set()
+            for row in shared["leaderboard_raw"][:10]:
+                seen_ranks.add(row["rank"])
+                selected_rows.append(row)
+            for row in shared["leaderboard_raw"][10:]:
+                if not row["is_bot"] and (row["uid"] == user_id or row["is_online"] or len(self.user_sessions) <= 15):
+                    if row["rank"] not in seen_ranks:
+                        seen_ranks.add(row["rank"])
+                        selected_rows.append(row)
+
+            leaderboard = [
+                {
+                    "rank": r["rank"],
+                    "id": r["id"],
+                    "is_you": (user_id is not None and r["uid"] == user_id),
+                    "is_bot": r["is_bot"],
+                    "is_online": r["is_online"],
+                    "strategy": r["strategy"],
+                    "target": r["target"],
+                    "eps": r["eps"],
+                    "cash": r["cash"],
+                    "qty": r["qty"],
+                    "value": r["value"],
+                    "pnl": r["pnl"],
+                }
+                for r in selected_rows
+            ]
 
             return {
                 "symbol": self.stock.name,
@@ -791,20 +923,23 @@ class LiveSimulation:
                 "speed": self.speed,
                 "allow_adding_bots": bool(_PLAYER_CFG.get("allow_adding_bots", True)),
                 "player_count": self.n,
-                "player_breakdown": breakdown,
+                "human_count": len(self.user_sessions),
+                "online_count": len(shared["online_users"]),
+                "online_users": shared["online_users"],
+                "player_breakdown": shared["breakdown"],
                 "tx_count": self.market.total_tx_count,
-                "history": history,
+                "history": shared["history"],
                 "candles": candles,
                 "asks": list(reversed(asks)),
                 "bids": bids,
-                "all_asks": [[p, q] for p, q in list(ask_levels.items())[:200]],
-                "all_bids": [[p, q] for p, q in list(bid_levels.items())[:200]],
-                "total_ask_qty": total_ask_qty,
-                "total_bid_qty": total_bid_qty,
+                "all_asks": shared["all_asks"],
+                "all_bids": shared["all_bids"],
+                "total_ask_qty": shared["total_ask_qty"],
+                "total_bid_qty": shared["total_bid_qty"],
                 "your_orders": your_orders,
-                "transactions": txs,
+                "transactions": shared["txs"],
                 "my_tx_version": sess.get("orders_version", 1) if sess else 0,
-                "leaderboard": leaderboard[:10],
+                "leaderboard": leaderboard,
                 "you": {
                     "username": username,
                     "cash": you_cash,
@@ -821,9 +956,31 @@ class LiveSimulation:
 sim = LiveSimulation()
 
 
-def require_user_id(userid: str | None = Cookie(default=None)) -> int:
+def _extract_bearer(authorization: str | None) -> str | None:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return None
+
+
+def resolve_user_id(
+    userid: str | None = Cookie(default=None),
+    x_session_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> int | None:
+    explicit_token = x_session_token or _extract_bearer(authorization)
+    if explicit_token:
+        uid = verify_user_cookie(explicit_token)
+        if uid is None or sim.ensure_user_session(uid) is None:
+            return None
+        return uid
     uid = verify_user_cookie(userid)
     if uid is None or sim.ensure_user_session(uid) is None:
+        return None
+    return uid
+
+
+def require_user_id(uid: int | None = Depends(resolve_user_id)) -> int:
+    if uid is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     return uid
 
@@ -908,20 +1065,47 @@ def login(req: LoginReq):
     if req.initial_amount <= 0:
         return JSONResponse({"ok": False, "message": "Initial amount must be positive."}, status_code=400)
     user = sim.login_or_restore_user(username, req.initial_amount)
-    resp = JSONResponse({"ok": True, "user": user})
+    token = sign_user_cookie(user["id"])
+    resp = JSONResponse({"ok": True, "user": user, "token": token})
     resp.set_cookie(
         key="userid",
-        value=sign_user_cookie(user["id"]),
+        value=token,
         httponly=True,
         samesite="lax",
+        path="/",
+    )
+    return resp
+
+
+@app.get("/api/session")
+def get_session_info(uid: int = Depends(require_user_id)):
+    sess = sim.ensure_user_session(uid)
+    token = sign_user_cookie(uid)
+    resp = JSONResponse({
+        "ok": True,
+        "user_id": uid,
+        "username": sess["username"] if sess else "",
+        "token": token,
+    })
+    resp.set_cookie(
+        key="userid",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
     )
     return resp
 
 
 @app.post("/api/logout")
-def logout():
+def logout(
+    userid: str | None = Cookie(default=None),
+    x_session_token: str | None = Header(default=None),
+):
     resp = JSONResponse({"ok": True})
-    resp.delete_cookie("userid")
+    # Only clear shared browser cookie if no per-tab token was used or it matches the cookie owner
+    if not x_session_token or verify_user_cookie(userid) == verify_user_cookie(x_session_token):
+        resp.delete_cookie("userid", path="/")
     return resp
 
 
@@ -929,7 +1113,7 @@ def logout():
 def index(userid: str | None = Cookie(default=None)):
     uid = verify_user_cookie(userid)
     if uid is None or sim.ensure_user_session(uid) is None:
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse(url="/login?next=1", status_code=302)
     html = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
@@ -941,7 +1125,9 @@ def get_state(interval: float = 60.0, uid: int = Depends(require_user_id)):
 
 @app.get("/api/my_transactions")
 def get_my_transactions(uid: int = Depends(require_user_id)):
-    return {"ok": True, "transactions": get_user_orders(uid)}
+    with sim._db_lock:
+        txs = get_user_orders(uid)
+    return {"ok": True, "transactions": txs}
 
 
 @app.post("/api/start")
@@ -1021,13 +1207,15 @@ def reset_players(uid: int = Depends(require_user_id)):
 
 
 @app.websocket("/ws")
-async def ws_state(websocket: WebSocket, interval: float = 60.0):
-    uid = verify_user_cookie(websocket.cookies.get("userid"))
+async def ws_state(websocket: WebSocket, interval: float = 60.0, token: str | None = None):
+    raw_tok = token or websocket.cookies.get("userid")
+    uid = verify_user_cookie(raw_tok)
     if uid is None or sim.ensure_user_session(uid) is None:
         await websocket.close(code=1008)
         return
 
     await websocket.accept()
+    sim.connect_ws(uid)
     state = {"interval": interval}
 
     async def recv_loop():
@@ -1042,18 +1230,20 @@ async def ws_state(websocket: WebSocket, interval: float = 60.0):
     reader = asyncio.create_task(recv_loop())
     try:
         while True:
-            await websocket.send_json(sim.get_state(user_id=uid, interval=state["interval"]))
+            payload = await asyncio.to_thread(sim.get_state, uid, state["interval"])
+            await websocket.send_json(payload)
             await asyncio.sleep(0.05)
     except WebSocketDisconnect:
         pass
     finally:
         reader.cancel()
+        sim.disconnect_ws(uid)
 
 
 if __name__ == "__main__":
     uvicorn.run(
         "dashboard:app",
-        host=_SERVER_CFG.get("host", "127.0.0.1"),
+        host=_SERVER_CFG.get("host", "0.0.0.0"),
         port=_SERVER_CFG.get("port", 5005),
         reload=True,
     )

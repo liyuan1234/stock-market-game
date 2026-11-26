@@ -257,6 +257,44 @@ class TestDashboardSessionAndPersistence(unittest.TestCase):
         txs3 = c_alice.get("/api/my_transactions").json()["transactions"]
         self.assertEqual(txs3[0]["status"], "partial_cancelled")
 
+    def test_concurrent_users_token_sessions_and_shared_leaderboard(self):
+        # Single shared client (like one browser with a shared cookie jar) but per-tab tokens
+        shared = TestClient(dashboard.app)
+        tok_a = shared.post("/api/login", json={"username": "DevA", "initial_amount": 10000.0}).json()["token"]
+        tok_b = shared.post("/api/login", json={"username": "DevB", "initial_amount": 20000.0}).json()["token"]
+
+        # Cookie now belongs to DevB, but DevA's token still identifies DevA
+        s_a = shared.get("/api/state", headers={"X-Session-Token": tok_a}).json()
+        s_b = shared.get("/api/state", headers={"X-Session-Token": tok_b}).json()
+        self.assertEqual(s_a["you"]["username"], "DevA")
+        self.assertEqual(s_b["you"]["username"], "DevB")
+        self.assertEqual(shared.get("/api/state").json()["you"]["username"], "DevB")
+
+        # Invalid token rejected even when a valid cookie exists
+        self.assertEqual(shared.get("/api/state", headers={"X-Session-Token": "1.bad"}).status_code, 401)
+
+        # Both humans appear on each other's leaderboard
+        names_a = {r["id"] for r in s_a["leaderboard"] if not r["is_bot"]}
+        self.assertEqual(names_a, {"DevA", "DevB"})
+        self.assertEqual(s_a["human_count"], 2)
+
+        # Orders placed via token act as the token's user
+        r = shared.post(
+            "/api/order",
+            json={"side": "sell", "price": 150.0, "amount": 3, "order_type": "limit"},
+            headers={"X-Session-Token": tok_a},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(shared.get("/api/state", headers={"X-Session-Token": tok_a}).json()["your_orders"]), 1)
+        self.assertEqual(len(shared.get("/api/state", headers={"X-Session-Token": tok_b}).json()["your_orders"]), 0)
+
+        # WebSocket via token query param marks user online
+        with shared.websocket_connect(f"/ws?token={tok_a}") as ws:
+            msg = ws.receive_json()
+            self.assertEqual(msg["you"]["username"], "DevA")
+            self.assertIn("DevA", msg["online_users"])
+        self.assertNotIn("DevA", self.sim.get_state(user_id=None)["online_users"])
+
     def test_large_order_dynamic_chunked_fills_and_price_aggregation(self):
         c_whale = TestClient(dashboard.app)
         c_whale.post("/api/login", json={"username": "Whale", "initial_amount": 5000000.0})

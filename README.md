@@ -22,13 +22,17 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Run the live dashboard (with hot-reload):
+Run the live dashboard (bound to `0.0.0.0` so multiple devices on the same network can join concurrently):
 
 ```bash
-.venv/bin/fastapi dev dashboard.py --port 5005
+.venv/bin/fastapi dev dashboard.py --host 0.0.0.0 --port 5005
 ```
 
-Then open `http://127.0.0.1:5005` in your browser (or `http://127.0.0.1:5005/docs` for the REST API).
+Then open `http://127.0.0.1:5005` locally or `http://<your-lan-ip>:5005` from other phones/laptops on your network (or `http://127.0.0.1:5005/docs` for the REST API).
+
+### Cloud Run / Container Deployment
+
+Because the live order book and market simulation run in-memory within a single shared market instance, deploy with `--max-instances=1` (and high per-instance concurrency, e.g. `--concurrency=80 --session-affinity`) so all connected devices share the same live exchange and session state.
 
 To run a standalone simulation and save a matplotlib plot to `images/`:
 
