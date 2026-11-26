@@ -13,6 +13,7 @@ import time
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -786,6 +787,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AAPL Live Market Dashboard", lifespan=lifespan)
 
+# --- Cross-origin support (static frontend on Vercel -> backend here) ------
+# ALLOWED_ORIGINS is a comma-separated list of frontend origins, e.g.
+#   ALLOWED_ORIGINS=https://stock-market-game-deploy.vercel.app
+# An explicit list is required because CORS forbids "*" together with
+# allow_credentials=True.
+_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in _origins_env.split(",") if o.strip()]
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# When the frontend is served from a different site (vercel.app) than the
+# API (trycloudflare.com), the session cookie must be SameSite=None; Secure
+# or the browser silently drops it. Left off by default so same-origin
+# behaviour is unchanged.
+_COOKIE_CROSS_SITE = os.getenv("CROSS_SITE_COOKIES", "0").strip() == "1"
+
 
 class SpeedReq(BaseModel):
     speed: float = 1.0
@@ -850,7 +873,8 @@ def login(req: LoginReq):
         key="userid",
         value=sign_user_cookie(user["id"]),
         httponly=True,
-        samesite="lax",
+        samesite="none" if _COOKIE_CROSS_SITE else "lax",
+        secure=_COOKIE_CROSS_SITE,
     )
     return resp
 

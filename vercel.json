@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "python3 build_vercel.py",
+  "outputDirectory": "public",
+  "framework": null,
+  "rewrites": [
+    { "source": "/login", "destination": "/login.html" }
+  ],
+  "headers": [
+    {
+      "source": "/config.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    }
+  ]
+}
