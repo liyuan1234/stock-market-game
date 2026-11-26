@@ -4,7 +4,7 @@
         "initial_price": 100.0,
         "number_of_stock": 1000
     },
-    "player": {
+    "bot": {
         "initial_cash": 1000000.0,
         "initial_shares": 50,
         "price_spread": 2.0,
@@ -12,6 +12,12 @@
         "max_order_qty": 10,
         "target_price_range": 5.0,
         "allow_short_selling": true
+    },
+    "player": {
+        "initial_cash": 1000000.0,
+        "initial_shares": 0,
+        "allow_short_selling": true,
+        "allow_adding_bots": true
     },
     "simulation": {
         "initial_players": 50,

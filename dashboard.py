@@ -14,6 +14,7 @@ from db import create_user, init_db, record_order
 from main import CFG, Player, exchange, stock
 
 _SIM_CFG = CFG.get("simulation", {})
+_BOT_CFG = CFG.get("bot", {})
 _PLAYER_CFG = CFG.get("player", {})
 _SERVER_CFG = CFG.get("server", {})
 
@@ -36,35 +37,41 @@ class LiveSimulation:
     def reset(self):
         with self.lock:
             self.n = self.initial_n
-            init_shares = _PLAYER_CFG.get("initial_shares", 50)
+            bot_shares = _BOT_CFG.get("initial_shares", 50)
+            player_shares = _PLAYER_CFG.get("initial_shares", 50)
+            player_cash = _PLAYER_CFG.get("initial_cash", 1000000.0)
             self.market = exchange()
             self.stock = stock()
             self.players = [
-                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": init_shares}])
+                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": bot_shares}])
                 for i in range(self.n)
             ]
             self.manual_player = Player(
-                id="YOU", stock=[{"name": self.stock.name, "qty": init_shares}]
+                id="YOU",
+                cash=player_cash,
+                stock=[{"name": self.stock.name, "qty": player_shares}],
             )
-            self.you_cost_basis = self.manual_player.cash + init_shares * self.stock.price
+            self.you_cost_basis = self.manual_player.cash + player_shares * self.stock.price
             self.next_times = [
                 random.expovariate(max(p.epsilon, 0.05) * 2) for p in self.players
             ]
             self.t = 0.0
+            self._next_bot_id = self.n + 1
             self.market.history[self.stock.name] = [(0.0, self.stock.price)]
 
     def reset_players(self):
         with self.lock:
             self.n = self.initial_n
-            init_shares = _PLAYER_CFG.get("initial_shares", 50)
+            bot_shares = _BOT_CFG.get("initial_shares", 50)
             self.players = [
-                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": init_shares}])
+                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": bot_shares}])
                 for i in range(self.n)
             ]
             self.next_times = [
                 self.t + random.expovariate(max(p.epsilon, 0.05) * 2)
                 for p in self.players
             ]
+            self._next_bot_id = self.n + 1
             self.market.bids = [b for b in self.market.bids if b["player"] is self.manual_player]
             self.market.asks = [a for a in self.market.asks if a["player"] is self.manual_player]
             return self.n
@@ -161,14 +168,20 @@ class LiveSimulation:
     def add_players(self, count=10, bias="random"):
         with self.lock:
             max_players = _SIM_CFG.get("max_players", 5000)
-            allowed = max(0, max_players - len(self.players))
-            count = min(count, allowed)
-            if count <= 0:
+            if count <= 0 or max_players <= 0:
                 return self.n
+            count = min(count, max_players)
+            overflow = (len(self.players) + count) - max_players
+            if overflow > 0:
+                evicted = set(self.players[:overflow])
+                self.players = self.players[overflow:]
+                self.next_times = self.next_times[overflow:]
+                self.market.bids = [b for b in self.market.bids if b["player"] not in evicted]
+                self.market.asks = [a for a in self.market.asks if a["player"] not in evicted]
+
             curr = self.stock.price
-            init_shares = _PLAYER_CFG.get("initial_shares", 50)
-            start_id = len(self.players) + 1
-            for i in range(count):
+            bot_shares = _BOT_CFG.get("initial_shares", 50)
+            for _ in range(count):
                 if bias == "bull":
                     strategy = {
                         "target_price": round(curr + random.uniform(2.0, 10.0), 2),
@@ -185,10 +198,11 @@ class LiveSimulation:
                         "type": random.choice(["buy_below", "sell_above", "buy_sell"]),
                     }
                 p = Player(
-                    id=start_id + i,
-                    stock=[{"name": self.stock.name, "qty": init_shares}],
+                    id=self._next_bot_id,
+                    stock=[{"name": self.stock.name, "qty": bot_shares}],
                     strategy=strategy,
                 )
+                self._next_bot_id += 1
                 self.players.append(p)
                 self.next_times.append(
                     self.t + random.expovariate(max(p.epsilon, 0.05) * 2)

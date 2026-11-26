@@ -15,7 +15,7 @@ def load_config():
 
 CFG = load_config()
 _STOCK_CFG = CFG.get("stock", {})
-_PLAYER_CFG = CFG.get("player", {})
+_BOT_CFG = CFG.get("bot", CFG.get("player", {}))
 _SIM_CFG = CFG.get("simulation", {})
 
 
@@ -105,11 +105,11 @@ class exchange:
 class Player:
     def __init__(self, id=None, cash=None, stock=None, epsilon=None, strategy=None):
         self.id = id
-        self.cash = _PLAYER_CFG.get("initial_cash", 1000000.0) if cash is None else cash
+        self.cash = _BOT_CFG.get("initial_cash", 1000000.0) if cash is None else cash
         self.stock = [dict(item) for item in stock] if stock else []  # list of {"name": str, "qty": int}
         self.epsilon = random.uniform(0, 1) if epsilon is None else epsilon
         init_price = _STOCK_CFG.get("initial_price", 100.0)
-        spread = _PLAYER_CFG.get("target_price_range", 5.0)
+        spread = _BOT_CFG.get("target_price_range", 5.0)
         self.strategy = (
             dict(strategy)
             if strategy is not None
@@ -137,18 +137,18 @@ class Player:
             market.submitBuyOrder(s, price, amount, self, t=t)
 
     def sell(self, market, s, price, amount, t=0.0):
-        if _PLAYER_CFG.get("allow_short_selling", True) or self.get_qty(s) >= amount:
+        if _BOT_CFG.get("allow_short_selling", True) or self.get_qty(s) >= amount:
             market.submitSellOrder(s, price, amount, self, t=t)
 
     def act(self, market, s, t=0.0):
         """Submit an order around current price according to the player's strategy."""
         target = self.strategy["target_price"]
         stype = self.strategy["type"]
-        p_spread = _PLAYER_CFG.get("price_spread", 2.0)
+        p_spread = _BOT_CFG.get("price_spread", 2.0)
         price = round(max(0.01, s.price + random.uniform(-p_spread, p_spread)), 2)
         amount = random.randint(
-            _PLAYER_CFG.get("min_order_qty", 1),
-            _PLAYER_CFG.get("max_order_qty", 10),
+            _BOT_CFG.get("min_order_qty", 1),
+            _BOT_CFG.get("max_order_qty", 10),
         )
 
         if stype in ("buy_below", "buy_sell") and s.price < target:
@@ -161,7 +161,7 @@ def run_simulation(n=None, duration=600.0):
     """Run one AAPL market simulation and return (history, final_price, tx_count)."""
     if n is None:
         n = _SIM_CFG.get("initial_players", 50)
-    init_shares = _PLAYER_CFG.get("initial_shares", 50)
+    init_shares = _BOT_CFG.get("initial_shares", 50)
     market = exchange()
     s = stock()
     players = [Player(id=i + 1, stock=[{"name": s.name, "qty": init_shares}]) for i in range(n)]

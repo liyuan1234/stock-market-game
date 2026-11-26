@@ -45,7 +45,7 @@
       <label for="username">Username</label>
       <input type="text" id="username" placeholder="Enter username" required autofocus />
       <label for="initial-amount">Initial Amount ($)</label>
-      <input type="number" id="initial-amount" min="1" step="1000" value="1000000" required />
+      <input type="number" id="initial-amount" min="1" step="any" value="1000000" placeholder="1000000" />
       <button type="submit">Enter</button>
     </form>
     <div class="err" id="err-msg"></div>
@@ -54,7 +54,7 @@
     document.getElementById('login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const username = document.getElementById('username').value.trim();
-      const initial_amount = Number(document.getElementById('initial-amount').value);
+      const initial_amount = Number(document.getElementById('initial-amount').value || 1000000);
       const errEl = document.getElementById('err-msg');
       errEl.textContent = '';
 
