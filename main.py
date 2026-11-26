@@ -83,11 +83,19 @@ class exchange:
 
 
 class Player:
-    def __init__(self, id=None, cash=10000.0, stock=None, epsilon=None):
+    def __init__(self, id=None, cash=10000.0, stock=None, epsilon=None, strategy=None):
         self.id = id
         self.cash = cash
         self.stock = [dict(item) for item in stock] if stock else []  # list of {"name": str, "qty": int}
         self.epsilon = random.uniform(0, 1) if epsilon is None else epsilon
+        self.strategy = (
+            dict(strategy)
+            if strategy is not None
+            else {
+                "target_price": round(random.uniform(95.0, 105.0), 2),
+                "type": random.choice(["buy_below", "sell_above", "buy_sell"]),
+            }
+        )
 
     def get_qty(self, s):
         for item in self.stock:
@@ -110,6 +118,18 @@ class Player:
         if self.get_qty(s) >= amount:
             market.submitSellOrder(s, price, amount, self, t=t)
 
+    def act(self, market, s, t=0.0):
+        """Submit an order around current price according to the player's strategy."""
+        target = self.strategy["target_price"]
+        stype = self.strategy["type"]
+        price = round(max(0.01, s.price + random.uniform(-2.0, 2.0)), 2)
+        amount = random.randint(1, 10)
+
+        if stype in ("buy_below", "buy_sell") and s.price < target:
+            self.buy(market, s, price, amount, t=t)
+        elif stype in ("sell_above", "buy_sell") and s.price > target:
+            self.sell(market, s, price, amount, t=t)
+
 
 def run_simulation(n=50, duration=600.0):
     """Run one AAPL market simulation and return (history, final_price, tx_count)."""
@@ -127,13 +147,7 @@ def run_simulation(n=50, duration=600.0):
             break
 
         p = players[idx]
-        price = round(max(0.01, s.price + random.uniform(-2.0, 2.0)), 2)
-        amount = random.randint(1, 10)
-
-        if random.choice([True, False]):
-            p.buy(market, s, price, amount, t=t)
-        else:
-            p.sell(market, s, price, amount, t=t)
+        p.act(market, s, t=t)
 
         next_times[idx] = t + random.expovariate(max(p.epsilon, 0.05) * 2)
 
@@ -163,7 +177,7 @@ def plot_price_history(history, symbol, output_dir="images"):
 
 
 if __name__ == "__main__":
-    history, final_price, tx_count = run_simulation(n=50, duration=120.0)
+    history, final_price, tx_count = run_simulation(n=50, duration=300.0)
     print(f"Final price: {final_price:.2f}, transactions: {tx_count}")
 
     saved_path = plot_price_history(history, "AAPL")
