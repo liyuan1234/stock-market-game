@@ -1,71 +1,378 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AAPL Live Market Dashboard</title>
   <style>
     :root {
-      --bg: #0d1117; --card: #161b22; --border: #30363d;
-      --text: #e6edf3; --muted: #8b949e; --green: #3fb950;
-      --red: #f85149; --blue: #58a6ff;
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --red: #f85149;
+      --blue: #58a6ff;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 16px; }
-    .top-row { display: flex; gap: 16px; align-items: stretch; margin-bottom: 16px; flex-wrap: wrap; }
-    .ticker-card { width: 210px; flex-shrink: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 18px; white-space: nowrap; }
-    .ticker-card h1 { font-size: 20px; }
-    .price { font-size: 26px; font-weight: 700; color: var(--blue); font-variant-numeric: tabular-nums; }
-    .controls-card { flex: 1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 16px; }
-    .stats { display: flex; align-items: center; gap: 12px; }
-    .meta { color: var(--muted); font-size: 13px; }
-    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    button, select, input { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
-    button:hover { border-color: var(--blue); }
-    .btn-buy { background: rgba(63,185,80,0.18); border-color: var(--green); color: var(--green); }
-    .btn-sell { background: rgba(248,81,73,0.18); border-color: var(--red); color: var(--red); }
-    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-    .card h2 { font-size: 14px; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-    canvas { width: 100%; height: 320px; display: block; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid #21262d; }
-    th:first-child, td:first-child { text-align: left; }
-    th { color: var(--muted); font-weight: 600; }
-    .ask { color: var(--red); }
-    .bid { color: var(--green); }
-    .spread { text-align: center; padding: 6px; margin: 4px 0; background: #21262d; border-radius: 4px; font-weight: 600; font-size: 13px; }
-    .trade-form { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
-    .trade-form input[type="number"] { width: 80px; cursor: text; }
-    .slider-group { display: inline-flex; flex-direction: column; min-width: 120px; gap: 2px; }
-    .slider-top { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
-    .slider-top strong { color: var(--text); font-variant-numeric: tabular-nums; }
-    .slider-group input[type="range"] { width: 100%; padding: 0; accent-color: var(--blue); cursor: pointer; height: 14px; }
-    .slider-marks { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); }
-    .slider-marks span { cursor: pointer; padding: 0 2px; }
-    .slider-marks span:hover { color: var(--blue); }
-    .status-msg { font-size: 12px; color: var(--muted); margin-top: 6px; }
-    .chart-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-    .tabs { display: flex; gap: 6px; }
-    .tab-btn { padding: 4px 10px; font-size: 12px; background: #21262d; border: 1px solid var(--border); color: var(--muted); }
-    .tab-btn.active { color: var(--text); border-color: var(--blue); background: rgba(88,166,255,0.15); }
-    .ohlc-bar { font-family: monospace; font-size: 12px; color: var(--muted); margin-bottom: 6px; min-height: 16px; }
-    .ratio-wrap { margin-bottom: 8px; }
-    .ratio-labels { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; font-weight: 600; }
-    .ratio-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #21262d; }
-    .ratio-bid { background: var(--green); transition: width 0.15s ease; }
-    .ratio-ask { background: var(--red); transition: width 0.15s ease; }
-    #book-hist { height: 240px; }
-    .tx-scroll { max-height: 360px; overflow: auto; }
-    .tx-scroll thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
-    .status-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: capitalize; white-space: nowrap; }
-    .status-filled { background: rgba(63,185,80,0.18); color: var(--green); }
-    .status-open, .status-partial { background: rgba(88,166,255,0.18); color: var(--blue); }
-    .status-cancelled, .status-partial_cancelled { background: #21262d; color: var(--muted); }
-    @media (max-width: 900px) { .grid, .grid-2 { grid-template-columns: 1fr; } }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+    }
+
+    .top-row {
+      display: flex;
+      gap: 16px;
+      align-items: stretch;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .ticker-card {
+      width: 210px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 18px;
+      white-space: nowrap;
+    }
+
+    .ticker-card h1 {
+      font-size: 20px;
+    }
+
+    .price {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--blue);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .controls-card {
+      flex: 1;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+    }
+
+    .stats {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    button,
+    select,
+    input {
+      background: #21262d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--blue);
+    }
+
+    .btn-buy {
+      background: rgba(63, 185, 80, 0.18);
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .btn-sell {
+      background: rgba(248, 81, 73, 0.18);
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .card h2 {
+      font-size: 14px;
+      color: var(--muted);
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 320px;
+      display: block;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th,
+    td {
+      text-align: right;
+      padding: 4px 6px;
+      border-bottom: 1px solid #21262d;
+    }
+
+    th:first-child,
+    td:first-child {
+      text-align: left;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .ask {
+      color: var(--red);
+    }
+
+    .bid {
+      color: var(--green);
+    }
+
+    .spread {
+      text-align: center;
+      padding: 6px;
+      margin: 4px 0;
+      background: #21262d;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .trade-form {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .trade-form input[type="number"] {
+      width: 80px;
+      cursor: text;
+    }
+
+    .slider-group {
+      display: inline-flex;
+      flex-direction: column;
+      min-width: 120px;
+      gap: 2px;
+    }
+
+    .slider-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .slider-top strong {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .slider-group input[type="range"] {
+      width: 100%;
+      padding: 0;
+      accent-color: var(--blue);
+      cursor: pointer;
+      height: 14px;
+    }
+
+    .slider-marks {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .slider-marks span {
+      cursor: pointer;
+      padding: 0 2px;
+    }
+
+    .slider-marks span:hover {
+      color: var(--blue);
+    }
+
+    .status-msg {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+    }
+
+    .tab-btn {
+      padding: 4px 10px;
+      font-size: 12px;
+      background: #21262d;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .tab-btn.active {
+      color: var(--text);
+      border-color: var(--blue);
+      background: rgba(88, 166, 255, 0.15);
+    }
+
+    .ohlc-bar {
+      font-family: monospace;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      min-height: 16px;
+    }
+
+    .ratio-wrap {
+      margin-bottom: 8px;
+    }
+
+    .ratio-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      margin-bottom: 3px;
+      font-weight: 600;
+    }
+
+    .ratio-bar {
+      display: flex;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      background: #21262d;
+    }
+
+    .ratio-bid {
+      background: var(--green);
+      transition: width 0.15s ease;
+    }
+
+    .ratio-ask {
+      background: var(--red);
+      transition: width 0.15s ease;
+    }
+
+    #book-hist {
+      height: 240px;
+    }
+
+    .tx-scroll {
+      max-height: 360px;
+      overflow: auto;
+    }
+
+    .tx-scroll thead th {
+      position: sticky;
+      top: 0;
+      background: var(--card);
+      z-index: 1;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: capitalize;
+      white-space: nowrap;
+    }
+
+    .status-filled {
+      background: rgba(63, 185, 80, 0.18);
+      color: var(--green);
+    }
+
+    .status-open,
+    .status-partial {
+      background: rgba(88, 166, 255, 0.18);
+      color: var(--blue);
+    }
+
+    .status-cancelled,
+    .status-partial_cancelled {
+      background: #21262d;
+      color: var(--muted);
+    }
+
+    @media (max-width: 900px) {
+
+      .grid,
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
+
 <body>
   <div class="top-row">
     <div class="card ticker-card">
@@ -90,7 +397,8 @@
         </select>
         <div class="slider-group">
           <div class="slider-top"><span>Bots</span><strong id="add-n-val">10</strong></div>
-          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="add-n-marks" oninput="syncSlider('add-n')" />
+          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="add-n-marks"
+            oninput="syncSlider('add-n')" />
           <div class="slider-marks" id="add-n-labels">
             <span onclick="setSliderVal('add-n', 1)">1</span>
             <span onclick="setSliderVal('add-n', 10)">10</span>
@@ -146,7 +454,8 @@
           <button class="tab-btn" id="tab-book-hist" onclick="setBookMode('hist')">Histogram</button>
         </div>
       </div>
-      <div class="status-msg" id="book-totals" style="margin-top:0;margin-bottom:4px;">Asks Total: 0 | Bids Total: 0</div>
+      <div class="status-msg" id="book-totals" style="margin-top:0;margin-bottom:4px;">Asks Total: 0 | Bids Total: 0
+      </div>
       <div class="ratio-wrap">
         <div class="ratio-labels">
           <span class="bid" id="bid-pct-lbl">Bid 50.0%</span>
@@ -159,7 +468,14 @@
       </div>
       <div id="book-table-view">
         <table>
-          <thead><tr><th>Side</th><th>Price</th><th>Amount</th><th></th></tr></thead>
+          <thead>
+            <tr>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Amount</th>
+              <th></th>
+            </tr>
+          </thead>
           <tbody id="asks-body"></tbody>
         </table>
         <div class="spread" id="mid-price">Last: $100.00</div>
@@ -178,7 +494,8 @@
         <input type="number" id="ord-price" step="0.01" min="0.01" value="100.00" placeholder="Price" />
         <div class="slider-group" style="min-width:170px;">
           <div class="slider-top"><span>Shares</span><strong id="ord-qty-val">5</strong></div>
-          <input type="range" id="ord-qty" min="0" max="6" step="0.01" value="0.7" list="ord-qty-marks" oninput="syncSlider('ord-qty')" />
+          <input type="range" id="ord-qty" min="0" max="6" step="0.01" value="0.7" list="ord-qty-marks"
+            oninput="syncSlider('ord-qty')" />
           <div class="slider-marks" id="ord-qty-labels">
             <span onclick="setSliderVal('ord-qty', 1)">1</span>
             <span onclick="setSliderVal('ord-qty', 10)">10</span>
@@ -211,7 +528,16 @@
       </div>
       <div id="tx-recent-view" style="display:none;">
         <table>
-          <thead><tr><th>ID</th><th>Time</th><th>Price</th><th>Qty</th><th>Buyer</th><th>Seller</th></tr></thead>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Time</th>
+              <th>Price</th>
+              <th>Qty</th>
+              <th>Buyer</th>
+              <th>Seller</th>
+            </tr>
+          </thead>
           <tbody id="tx-body"></tbody>
         </table>
       </div>
@@ -239,7 +565,17 @@
     <div class="card">
       <h2 id="players-heading">Top Players (Total: 50)</h2>
       <table>
-        <thead><tr><th>Player</th><th>Strategy</th><th>Target</th><th>Eps</th><th>Cash</th><th>Qty</th><th>Value</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Strategy</th>
+            <th>Target</th>
+            <th>Eps</th>
+            <th>Cash</th>
+            <th>Qty</th>
+            <th>Value</th>
+          </tr>
+        </thead>
         <tbody id="lb-body"></tbody>
       </table>
     </div>
@@ -415,7 +751,7 @@
         if (Array.isArray(shareTicks) && shareTicks.length >= 2) {
           initSlider('ord-qty', shareTicks, 5);
         }
-      } catch (e) {}
+      } catch (e) { }
     })();
 
     async function placeOrder(side) {
@@ -721,9 +1057,20 @@
         const filled = Number(o.filled_amount || 0);
         const amount = Number(o.order_amount || 0);
         const fills = Array.isArray(o.fills) ? o.fills : [];
+        const groupedFills = [];
+        const fillsByPrice = new Map();
+        fills.forEach(f => {
+          const p = Number(f.fill_price).toFixed(2);
+          if (!fillsByPrice.has(p)) {
+            const entry = { price: p, qty: 0 };
+            fillsByPrice.set(p, entry);
+            groupedFills.push(entry);
+          }
+          fillsByPrice.get(p).qty += Number(f.fill_qty);
+        });
         const execPrice = filled > 0 ? Number(o.exec_price || 0).toFixed(2) : '—';
-        const fillDetail = fills.length > 0
-          ? `<div style="font-size:10px;color:var(--muted);">${fills.map(f => `${Number(f.fill_qty)}@${Number(f.fill_price).toFixed(2)}`).join(', ')}</div>`
+        const fillDetail = groupedFills.length > 0
+          ? `<div style="font-size:10px;color:var(--muted);">${groupedFills.map(f => `${f.qty}@${f.price}`).join(', ')}</div>`
           : '';
         const statusRaw = String(o.status || 'open');
         const statusCls = ['filled', 'open', 'partial', 'cancelled', 'partial_cancelled'].includes(statusRaw)
@@ -926,8 +1273,8 @@
         .join(''));
       setHtml('your-orders', data.your_orders.length
         ? 'Open Orders: ' + data.your_orders.map(o =>
-            `${escHtml(o.side.toUpperCase())} ${Number(o.amount)}@${o.price.toFixed(2)} <button data-cancel-id="${Number(o.id)}" style="padding:1px 5px;font-size:11px;">Cancel</button>`
-          ).join(' ')
+          `${escHtml(o.side.toUpperCase())} ${Number(o.amount)}@${o.price.toFixed(2)} <button data-cancel-id="${Number(o.id)}" style="padding:1px 5px;font-size:11px;">Cancel</button>`
+        ).join(' ')
         : '');
       setHtml('tx-body', data.transactions
         .map(tx => `<tr><td>#${Number(tx.id)}</td><td>${tx.time.toFixed(2)}s</td><td>${tx.price.toFixed(2)}</td><td>${Number(tx.qty)}</td><td>${escHtml(tx.buyer_id)}</td><td>${escHtml(tx.seller_id)}</td></tr>`)
@@ -949,7 +1296,7 @@
           return;
         }
         applyState(await res.json());
-      } catch (e) {}
+      } catch (e) { }
     }
 
     let ws = null;
@@ -979,4 +1326,5 @@
     requestAnimationFrame(animate);
   </script>
 </body>
+
 </html>
