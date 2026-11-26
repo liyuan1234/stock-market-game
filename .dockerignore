@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+__pycache__/
+*.pyc
+*.db
+.session_secret
+.DS_Store
+images/
+assets/
+tests/
+README.md
