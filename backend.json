@@ -1,0 +1,4 @@
+{
+  "_comment": "Default backend origin for the Vercel-hosted static frontend. Override with the VERCEL_API_BASE env var in Vercel project settings.",
+  "api_base": "https://commonwealth-casey-stored-belief.trycloudflare.com"
+}
