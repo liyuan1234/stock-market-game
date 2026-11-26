@@ -1,9 +1,10 @@
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import sqlite3
 
-DB_PATH = Path(__file__).with_name("market.db")
+DB_PATH = Path(os.environ.get("MARKET_DB_PATH") or Path(__file__).with_name("market.db"))
 
 
 @contextmanager
@@ -69,8 +70,33 @@ def init_db():
         if "status" not in order_cols:
             conn.execute("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                userid INTEGER NOT NULL,
+                stock_name TEXT NOT NULL,
+                side TEXT NOT NULL,
+                time REAL NOT NULL,
+                fill_price REAL NOT NULL,
+                fill_qty INTEGER NOT NULL,
+                user_balance REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (userid) REFERENCES users(id)
+            )
+            """
+        )
 
-def create_user(username: str, initial_cash: float, initial_shares: int = 0, stock_price: float = 100.0):
+
+def create_user(
+    username: str,
+    initial_cash: float,
+    initial_shares: int = 0,
+    stock_price: float = 100.0,
+    allow_existing: bool = False,
+):
     now = datetime.now(timezone.utc).isoformat()
     cost_basis = round(initial_cash + initial_shares * stock_price, 2)
     with get_conn() as conn:
@@ -78,28 +104,39 @@ def create_user(username: str, initial_cash: float, initial_shares: int = 0, sto
             "SELECT id, username, initial_cash, cash, shares, cost_basis FROM users WHERE username = ?",
             (username,),
         ).fetchone()
-        if existing is None:
-            conn.execute(
-                """
-                INSERT INTO users (username, initial_cash, cash, shares, cost_basis, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (username, initial_cash, initial_cash, initial_shares, cost_basis, now),
-            )
-            row = conn.execute(
-                "SELECT id, username, initial_cash, cash, shares, cost_basis FROM users WHERE username = ?",
-                (username,),
-            ).fetchone()
-            return dict(row)
+        if existing is not None and allow_existing:
+            user = dict(existing)
+            if user.get("cash") is None:
+                user["cash"] = user["initial_cash"]
+            if user.get("shares") is None:
+                user["shares"] = initial_shares
+            if user.get("cost_basis") is None:
+                user["cost_basis"] = round(user["initial_cash"] + user["shares"] * stock_price, 2)
+            return user
 
-        user = dict(existing)
-        if user.get("cash") is None:
-            user["cash"] = user["initial_cash"]
-        if user.get("shares") is None:
-            user["shares"] = initial_shares
-        if user.get("cost_basis") is None:
-            user["cost_basis"] = round(user["initial_cash"] + user["shares"] * stock_price, 2)
-        return user
+        chosen_name = username
+        if existing is not None:
+            suffix = 2
+            while True:
+                candidate = f"{username[:26]}#{suffix}"
+                taken = conn.execute("SELECT 1 FROM users WHERE username = ?", (candidate,)).fetchone()
+                if taken is None:
+                    chosen_name = candidate
+                    break
+                suffix += 1
+
+        conn.execute(
+            """
+            INSERT INTO users (username, initial_cash, cash, shares, cost_basis, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (chosen_name, initial_cash, initial_cash, initial_shares, cost_basis, now),
+        )
+        row = conn.execute(
+            "SELECT id, username, initial_cash, cash, shares, cost_basis FROM users WHERE username = ?",
+            (chosen_name,),
+        ).fetchone()
+        return dict(row)
 
 
 def get_user(user_id: int):
@@ -204,3 +241,62 @@ def record_order_cancel(db_order_id: int, user_balance: float):
             "UPDATE orders SET status = ?, user_balance = ? WHERE id = ?",
             (status, round(user_balance, 2), db_order_id),
         )
+
+
+def record_fill(
+    order_id: int,
+    userid: int,
+    stock_name: str,
+    side: str,
+    time: float,
+    fill_price: float,
+    fill_qty: int,
+    user_balance: float,
+):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO fills (order_id, userid, stock_name, side, time, fill_price, fill_qty, user_balance, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (order_id, userid, stock_name, side, time, round(fill_price, 4), int(fill_qty), round(user_balance, 2), now),
+        )
+
+
+def get_user_orders(userid: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, stock_name, side, order_type, time,
+                   order_price, order_amount, filled_amount, exec_price,
+                   status, user_balance, created_at
+            FROM orders
+            WHERE userid = ?
+            ORDER BY id DESC
+            """,
+            (userid,),
+        ).fetchall()
+        fill_rows = conn.execute(
+            """
+            SELECT order_id, time, fill_price, fill_qty, user_balance
+            FROM fills
+            WHERE userid = ?
+            ORDER BY id ASC
+            """,
+            (userid,),
+        ).fetchall()
+        fills_by_order: dict[int, list[dict]] = {}
+        for fr in fill_rows:
+            fills_by_order.setdefault(fr["order_id"], []).append({
+                "time": fr["time"],
+                "fill_price": fr["fill_price"],
+                "fill_qty": fr["fill_qty"],
+                "user_balance": fr["user_balance"],
+            })
+        orders = []
+        for r in rows:
+            d = dict(r)
+            d["fills"] = fills_by_order.get(d["id"], [])
+            orders.append(d)
+        return orders

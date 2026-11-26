@@ -19,7 +19,9 @@ import uvicorn
 from db import (
     create_user,
     get_user,
+    get_user_orders,
     init_db,
+    record_fill,
     record_order,
     record_order_cancel,
     record_order_fill,
@@ -153,15 +155,34 @@ class LiveSimulation:
                         status=status,
                         user_balance=player.cash,
                     )
+                    record_fill(
+                        order_id=db_oid,
+                        userid=uid,
+                        stock_name=self.stock.name,
+                        side=order["side"],
+                        time=tx["time"],
+                        fill_price=tx["price"],
+                        fill_qty=tx["qty"],
+                        user_balance=player.cash,
+                    )
+                    if sess:
+                        sess["orders_version"] = sess.get("orders_version", 1) + 1
 
     def _on_market_cancel(self, order: dict):
         player = order.get("player")
         db_oid = order.get("db_order_id")
         if player is not None and db_oid is not None:
             record_order_cancel(db_oid, user_balance=player.cash)
+            uid = self._player_to_uid.get(player)
+            if uid is not None and uid in self.user_sessions:
+                self.user_sessions[uid]["orders_version"] = self.user_sessions[uid].get("orders_version", 1) + 1
 
     def reset(self):
         with self.lock:
+            if hasattr(self, "market") and self.market is not None:
+                for resting in list(self.market.bids) + list(self.market.asks):
+                    if resting.get("db_order_id") is not None:
+                        self._on_market_cancel(resting)
             self.n = self.initial_n
             bot_shares = _BOT_CFG.get("initial_shares", 50)
             player_shares = _PLAYER_CFG.get("initial_shares", 0)
@@ -271,6 +292,7 @@ class LiveSimulation:
                     "initial_cash": user["initial_cash"],
                     "cost_basis": user["cost_basis"],
                     "player": p,
+                    "orders_version": 1,
                 }
                 self._player_to_uid[p] = uid
             return user
@@ -304,6 +326,7 @@ class LiveSimulation:
                 "initial_cash": user["initial_cash"],
                 "cost_basis": cost_basis,
                 "player": p,
+                "orders_version": 1,
             }
             self.user_sessions[user_id] = sess
             self._player_to_uid[p] = user_id
@@ -339,7 +362,7 @@ class LiveSimulation:
                 filled = order["filled_qty"]
                 avg_exec = round(order["fill_notional"] / filled, 4) if filled > 0 else 0.0
                 status = "filled" if filled == amount else "partial_cancelled"
-                record_order(
+                db_oid = record_order(
                     userid=user_id,
                     stock_name=self.stock.name,
                     side=side,
@@ -352,12 +375,24 @@ class LiveSimulation:
                     exec_price=avg_exec,
                     status=status,
                 )
+                for ft, fp, fq in order.get("fills", []):
+                    record_fill(
+                        order_id=db_oid,
+                        userid=user_id,
+                        stock_name=self.stock.name,
+                        side=side,
+                        time=ft,
+                        fill_price=fp,
+                        fill_qty=fq,
+                        user_balance=player.cash,
+                    )
                 save_user_state(
                     user_id,
                     cash=player.cash,
                     shares=player.get_qty(self.stock),
                     cost_basis=sess["cost_basis"],
                 )
+                sess["orders_version"] = sess.get("orders_version", 1) + 1
                 return True, msg
 
             # Limit order
@@ -390,6 +425,18 @@ class LiveSimulation:
                 status=status,
             )
             order["db_order_id"] = db_oid
+            for ft, fp, fq in order.get("fills", []):
+                record_fill(
+                    order_id=db_oid,
+                    userid=user_id,
+                    stock_name=self.stock.name,
+                    side=side,
+                    time=ft,
+                    fill_price=fp,
+                    fill_qty=fq,
+                    user_balance=player.cash,
+                )
+            sess["orders_version"] = sess.get("orders_version", 1) + 1
             if filled > 0:
                 msg = f"{side.capitalize()} limit filled {filled}/{amount} @ ${avg_exec:.2f}."
             return True, msg
@@ -674,6 +721,7 @@ class LiveSimulation:
                 "total_bid_qty": total_bid_qty,
                 "your_orders": your_orders,
                 "transactions": txs,
+                "my_tx_version": sess.get("orders_version", 1) if sess else 0,
                 "leaderboard": leaderboard[:10],
                 "you": {
                     "username": username,
@@ -763,6 +811,11 @@ def login_page():
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/config")
+def get_config():
+    return {"sliders": CFG.get("sliders", {})}
+
+
 @app.post("/api/login")
 def login(req: LoginReq):
     username = req.username.strip()
@@ -802,6 +855,11 @@ def index(userid: str | None = Cookie(default=None)):
 @app.get("/api/state")
 def get_state(interval: float = 60.0, uid: int = Depends(require_user_id)):
     return sim.get_state(user_id=uid, interval=interval)
+
+
+@app.get("/api/my_transactions")
+def get_my_transactions(uid: int = Depends(require_user_id)):
+    return {"ok": True, "transactions": get_user_orders(uid)}
 
 
 @app.post("/api/start")

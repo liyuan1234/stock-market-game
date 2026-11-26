@@ -57,6 +57,12 @@
     .ratio-bid { background: var(--green); transition: width 0.15s ease; }
     .ratio-ask { background: var(--red); transition: width 0.15s ease; }
     #book-hist { height: 240px; }
+    .tx-scroll { max-height: 360px; overflow: auto; }
+    .tx-scroll thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+    .status-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: capitalize; white-space: nowrap; }
+    .status-filled { background: rgba(63,185,80,0.18); color: var(--green); }
+    .status-open, .status-partial { background: rgba(88,166,255,0.18); color: var(--blue); }
+    .status-cancelled, .status-partial_cancelled { background: #21262d; color: var(--muted); }
     @media (max-width: 900px) { .grid, .grid-2 { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -84,20 +90,15 @@
         </select>
         <div class="slider-group">
           <div class="slider-top"><span>Bots</span><strong id="add-n-val">10</strong></div>
-          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="pow10-marks" oninput="syncSlider('add-n')" />
-          <div class="slider-marks">
+          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="add-n-marks" oninput="syncSlider('add-n')" />
+          <div class="slider-marks" id="add-n-labels">
             <span onclick="setSliderVal('add-n', 1)">1</span>
             <span onclick="setSliderVal('add-n', 10)">10</span>
             <span onclick="setSliderVal('add-n', 100)">100</span>
-            <span onclick="setSliderVal('add-n', 1000)">1000</span>
+            <span onclick="setSliderVal('add-n', 500)">500</span>
           </div>
+          <datalist id="add-n-marks"></datalist>
         </div>
-        <datalist id="pow10-marks">
-          <option value="0"></option>
-          <option value="1"></option>
-          <option value="2"></option>
-          <option value="3"></option>
-        </datalist>
         <select id="add-bias">
           <option value="random" selected>Random</option>
           <option value="bull">Buyers (Bull)</option>
@@ -175,15 +176,19 @@
           <option value="market">Market</option>
         </select>
         <input type="number" id="ord-price" step="0.01" min="0.01" value="100.00" placeholder="Price" />
-        <div class="slider-group" style="min-width:110px;">
+        <div class="slider-group" style="min-width:170px;">
           <div class="slider-top"><span>Shares</span><strong id="ord-qty-val">5</strong></div>
-          <input type="range" id="ord-qty" min="0" max="3" step="0.01" value="0.7" list="pow10-marks" oninput="syncSlider('ord-qty')" />
-          <div class="slider-marks">
+          <input type="range" id="ord-qty" min="0" max="6" step="0.01" value="0.7" list="ord-qty-marks" oninput="syncSlider('ord-qty')" />
+          <div class="slider-marks" id="ord-qty-labels">
             <span onclick="setSliderVal('ord-qty', 1)">1</span>
             <span onclick="setSliderVal('ord-qty', 10)">10</span>
             <span onclick="setSliderVal('ord-qty', 100)">100</span>
-            <span onclick="setSliderVal('ord-qty', 1000)">1000</span>
+            <span onclick="setSliderVal('ord-qty', 500)">500</span>
+            <span onclick="setSliderVal('ord-qty', 1000)">1k</span>
+            <span onclick="setSliderVal('ord-qty', 5000)">5k</span>
+            <span onclick="setSliderVal('ord-qty', 10000)">10k</span>
           </div>
+          <datalist id="ord-qty-marks"></datalist>
         </div>
         <button class="btn-buy" onclick="placeOrder('buy')">Buy</button>
         <button class="btn-sell" onclick="placeOrder('sell')">Sell</button>
@@ -197,11 +202,39 @@
 
   <div class="grid-2">
     <div class="card">
-      <h2>Recent Transactions</h2>
-      <table>
-        <thead><tr><th>ID</th><th>Time</th><th>Price</th><th>Qty</th><th>Buyer</th><th>Seller</th></tr></thead>
-        <tbody id="tx-body"></tbody>
-      </table>
+      <div class="chart-header">
+        <h2 style="margin-bottom:0;" id="tx-heading">My Transactions</h2>
+        <div class="tabs">
+          <button class="tab-btn active" id="tab-tx-all" onclick="setTxMode('mine')">My Transactions (0)</button>
+          <button class="tab-btn" id="tab-tx-recent" onclick="setTxMode('recent')">Recent</button>
+        </div>
+      </div>
+      <div id="tx-recent-view" style="display:none;">
+        <table>
+          <thead><tr><th>ID</th><th>Time</th><th>Price</th><th>Qty</th><th>Buyer</th><th>Seller</th></tr></thead>
+          <tbody id="tx-body"></tbody>
+        </table>
+      </div>
+      <div id="tx-mine-view">
+        <div class="tx-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Time</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th>Price</th>
+                <th>Exec</th>
+                <th>Filled/Qty</th>
+                <th>Status</th>
+                <th>Balance</th>
+              </tr>
+            </thead>
+            <tbody id="my-tx-body"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
     <div class="card">
       <h2 id="players-heading">Top Players (Total: 50)</h2>
@@ -318,9 +351,36 @@
       priceEl.style.opacity = isMarket ? '0.45' : '1';
     }
 
+    const SLIDER_TICKS = {
+      'add-n': [1, 10, 100, 500],
+      'ord-qty': [1, 10, 100, 500, 1000, 5000, 10000],
+    };
+
+    function fmtTick(n) {
+      return n >= 1000 ? `${n / 1000}k` : String(n);
+    }
+
+    function initSlider(id, ticks, defaultVal) {
+      SLIDER_TICKS[id] = ticks;
+      const el = document.getElementById(id);
+      el.min = 0;
+      el.max = Math.max(1, ticks.length - 1);
+      document.getElementById(`${id}-marks`).innerHTML = ticks
+        .map((_, i) => `<option value="${i}"></option>`)
+        .join('');
+      document.getElementById(`${id}-labels`).innerHTML = ticks
+        .map((t) => `<span onclick="setSliderVal('${id}', ${t})">${fmtTick(t)}</span>`)
+        .join('');
+      setSliderVal(id, defaultVal);
+    }
+
     function sliderToInt(id) {
+      const ticks = SLIDER_TICKS[id];
       const v = Number(document.getElementById(id).value);
-      return Math.max(1, Math.round(Math.pow(10, v)));
+      const i = Math.min(ticks.length - 2, Math.max(0, Math.floor(v)));
+      const f = v - i;
+      const val = Math.pow(ticks[i], 1 - f) * Math.pow(ticks[i + 1], f);
+      return Math.max(ticks[0], Math.min(ticks[ticks.length - 1], Math.round(val)));
     }
 
     function syncSlider(id) {
@@ -328,9 +388,35 @@
     }
 
     function setSliderVal(id, num) {
-      document.getElementById(id).value = Math.log10(Math.max(1, num));
+      const ticks = SLIDER_TICKS[id];
+      const clamped = Math.max(ticks[0], Math.min(ticks[ticks.length - 1], num));
+      let pos = 0;
+      for (let i = 0; i < ticks.length - 1; i++) {
+        if (clamped >= ticks[i] && clamped <= ticks[i + 1]) {
+          pos = i + Math.log(clamped / ticks[i]) / Math.log(ticks[i + 1] / ticks[i]);
+          break;
+        }
+      }
+      document.getElementById(id).value = pos;
       syncSlider(id);
     }
+
+    (async function loadSliderConfig() {
+      initSlider('add-n', SLIDER_TICKS['add-n'], 10);
+      initSlider('ord-qty', SLIDER_TICKS['ord-qty'], 5);
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        const s = cfg.sliders || {};
+        if (Array.isArray(s.bot_slider_ticks) && s.bot_slider_ticks.length >= 2) {
+          initSlider('add-n', s.bot_slider_ticks, 10);
+        }
+        const shareTicks = s.shares_slider_tick || s.shares_slider_ticks;
+        if (Array.isArray(shareTicks) && shareTicks.length >= 2) {
+          initSlider('ord-qty', shareTicks, 5);
+        }
+      } catch (e) {}
+    })();
 
     async function placeOrder(side) {
       const order_type = document.getElementById('ord-type').value;
@@ -604,6 +690,77 @@
       if (lastData && mode === 'hist') drawBookHistogram(lastData);
     }
 
+    let txMode = 'mine';
+    let lastMyTxVersion = -1;
+    let myTxFetching = false;
+    let pendingMyTxReload = false;
+    loadMyTransactions();
+
+    function setTxMode(mode) {
+      txMode = mode;
+      document.getElementById('tab-tx-recent').classList.toggle('active', mode === 'recent');
+      document.getElementById('tab-tx-all').classList.toggle('active', mode === 'mine');
+      document.getElementById('tx-recent-view').style.display = mode === 'recent' ? 'block' : 'none';
+      document.getElementById('tx-mine-view').style.display = mode === 'mine' ? 'block' : 'none';
+      document.getElementById('tx-heading').textContent = mode === 'recent' ? 'Recent Transactions' : 'My Transactions';
+      if (mode === 'mine' && lastMyTxVersion === -1) loadMyTransactions();
+    }
+
+    function renderMyTransactions(rows) {
+      document.getElementById('tab-tx-all').textContent = `My Transactions (${rows.length})`;
+      if (!rows.length) {
+        setHtml('my-tx-body', '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:12px;">No transactions taken yet.</td></tr>');
+        return;
+      }
+      setHtml('my-tx-body', rows.map(o => {
+        const isBuy = o.side === 'buy';
+        const sideCls = isBuy ? 'bid' : 'ask';
+        const sideLbl = isBuy ? 'BUY' : 'SELL';
+        const orderType = escHtml(o.order_type || 'limit');
+        const orderPrice = Number(o.order_price || 0).toFixed(2);
+        const filled = Number(o.filled_amount || 0);
+        const amount = Number(o.order_amount || 0);
+        const fills = Array.isArray(o.fills) ? o.fills : [];
+        const execPrice = filled > 0 ? Number(o.exec_price || 0).toFixed(2) : '—';
+        const fillDetail = fills.length > 0
+          ? `<div style="font-size:10px;color:var(--muted);">${fills.map(f => `${Number(f.fill_qty)}@${Number(f.fill_price).toFixed(2)}`).join(', ')}</div>`
+          : '';
+        const statusRaw = String(o.status || 'open');
+        const statusCls = ['filled', 'open', 'partial', 'cancelled', 'partial_cancelled'].includes(statusRaw)
+          ? `status-${statusRaw}`
+          : 'status-cancelled';
+        const statusLabel = escHtml(statusRaw.replace('_', ' '));
+        const balance = Number(o.user_balance || 0).toFixed(2);
+        return `<tr><td>#${Number(o.id)}</td><td>${Number(o.time || 0).toFixed(2)}s</td><td class="${sideCls}">${sideLbl}</td><td>${orderType}</td><td>${orderPrice}</td><td>${execPrice}${fillDetail}</td><td>${filled}/${amount}</td><td><span class="status-badge ${statusCls}">${statusLabel}</span></td><td>${balance}</td></tr>`;
+      }).join(''));
+    }
+
+    async function loadMyTransactions() {
+      if (myTxFetching) {
+        pendingMyTxReload = true;
+        return;
+      }
+      myTxFetching = true;
+      try {
+        const res = await fetch('/api/my_transactions');
+        if (res.status === 401) {
+          window.location.href = '/login';
+          return;
+        }
+        const payload = await res.json();
+        if (payload.ok && Array.isArray(payload.transactions)) {
+          renderMyTransactions(payload.transactions);
+        }
+      } catch (e) {
+      } finally {
+        myTxFetching = false;
+        if (pendingMyTxReload) {
+          pendingMyTxReload = false;
+          loadMyTransactions();
+        }
+      }
+    }
+
     function drawBookHistogram(data) {
       const canvas = document.getElementById('book-hist');
       const dpr = window.devicePixelRatio || 1;
@@ -775,6 +932,10 @@
       setHtml('tx-body', data.transactions
         .map(tx => `<tr><td>#${Number(tx.id)}</td><td>${tx.time.toFixed(2)}s</td><td>${tx.price.toFixed(2)}</td><td>${Number(tx.qty)}</td><td>${escHtml(tx.buyer_id)}</td><td>${escHtml(tx.seller_id)}</td></tr>`)
         .join(''));
+      if (data.my_tx_version !== undefined && data.my_tx_version !== lastMyTxVersion) {
+        lastMyTxVersion = data.my_tx_version;
+        loadMyTransactions();
+      }
       setHtml('lb-body', data.leaderboard
         .map(p => `<tr><td>P${escHtml(p.id)}</td><td>${escHtml(p.strategy)}</td><td>${p.target.toFixed(2)}</td><td>${p.eps.toFixed(2)}</td><td>${p.cash.toFixed(2)}</td><td>${Number(p.qty)}</td><td>${p.value.toFixed(2)}</td></tr>`)
         .join(''));

@@ -25,6 +25,23 @@
         "duration": null,
         "tick_dt": 0.05
     },
+    "sliders": {
+        "bot_slider_ticks": [
+            1,
+            10,
+            100,
+            500
+        ],
+        "shares_slider_tick": [
+            1,
+            10,
+            100,
+            500,
+            1000,
+            5000,
+            10000
+        ]
+    },
     "server": {
         "host": "127.0.0.1",
         "port": 5005

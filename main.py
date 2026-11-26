@@ -103,6 +103,9 @@ class exchange:
         ask["filled_qty"] = ask.get("filled_qty", 0) + qty
         bid["fill_notional"] = bid.get("fill_notional", 0.0) + trade_price * qty
         ask["fill_notional"] = ask.get("fill_notional", 0.0) + trade_price * qty
+        fill_entry = (round(t, 4), round(trade_price, 2), qty)
+        bid.setdefault("fills", []).append(fill_entry)
+        ask.setdefault("fills", []).append(fill_entry)
         s.price = round(trade_price, 4)
 
         buyer = bid.get("player")
