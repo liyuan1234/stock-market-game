@@ -459,28 +459,35 @@
           <div class="slider-marks" id="add-freq-labels"></div>
           <datalist id="add-freq-marks"></datalist>
         </div>
-        <select id="add-bias">
-          <option value="random" selected>Random</option>
-          <option value="bull">Buyers (Bull)</option>
-          <option value="bear">Sellers (Bear)</option>
+        <select id="add-bias" title="Bot type and bias for new bots">
+          <optgroup label="Uniform">
+            <option value="uniform:random" selected title="Fixed target, uniform around the current price">Uniform · Random</option>
+            <option value="uniform:bull" title="Fixed target, uniform around the current price">Uniform · Buyers (Bull)</option>
+            <option value="uniform:bear" title="Fixed target, uniform around the current price">Uniform · Sellers (Bear)</option>
+          </optgroup>
+          <optgroup label="Normal">
+            <option value="normal:random" title="Fixed target, normally distributed around the current price">Normal · Random</option>
+            <option value="normal:bull" title="Fixed target, normally distributed around the current price">Normal · Buyers (Bull)</option>
+            <option value="normal:bear" title="Fixed target, normally distributed around the current price">Normal · Sellers (Bear)</option>
+          </optgroup>
+          <optgroup label="Follow Price">
+            <option value="follow:random" title="Target follows the current price (moving average)">Follow Price · Random</option>
+            <option value="follow:bull" title="Target follows the current price (moving average)">Follow Price · Buyers (Bull)</option>
+            <option value="follow:bear" title="Target follows the current price (moving average)">Follow Price · Sellers (Bear)</option>
+          </optgroup>
+          <optgroup label="Historical Avg">
+            <option value="history_avg:random" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Random</option>
+            <option value="history_avg:bull" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Buyers (Bull)</option>
+            <option value="history_avg:bear" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Sellers (Bear)</option>
+          </optgroup>
+          <optgroup label="Momentum">
+            <option value="momentum:random" title="Target extrapolates the recent trend in past prices">Momentum · Random</option>
+            <option value="momentum:bull" title="Target extrapolates the recent trend in past prices">Momentum · Buyers (Bull)</option>
+            <option value="momentum:bear" title="Target extrapolates the recent trend in past prices">Momentum · Sellers (Bear)</option>
+          </optgroup>
         </select>
-        <div class="slider-group">
-          <div class="slider-top"><span>Bot Type</span></div>
-          <div class="tabs" id="bot-type-btns">
-            <button class="tab-btn active" data-bot-type="uniform" onclick="setBotType('uniform')"
-              title="Fixed target, uniform around the current price">Uniform</button>
-            <button class="tab-btn" data-bot-type="normal" onclick="setBotType('normal')"
-              title="Fixed target, normally distributed around the current price">Normal</button>
-            <button class="tab-btn" data-bot-type="follow" onclick="setBotType('follow')"
-              title="Target follows the current price (moving average)">Follow</button>
-            <button class="tab-btn" data-bot-type="history_avg" onclick="setBotType('history_avg')"
-              title="Target is the average of historical prices over a 30s–5m window">Hist Avg</button>
-            <button class="tab-btn" data-bot-type="momentum" onclick="setBotType('momentum')"
-              title="Target extrapolates the recent trend in past prices">Momentum</button>
-          </div>
-        </div>
-        <button onclick="addPlayers()">+ Players</button>
-        <button onclick="resetPlayers()">Reset Players</button>
+        <button onclick="addPlayers()">+ Bots</button>
+        <button onclick="resetPlayers()">Reset Bots</button>
         <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
         <button onclick="injectCash()">+ $ All</button>
         <button onclick="injectStock()">+ 10 Stocks</button>
@@ -908,20 +915,12 @@
       syncFreq();
     })();
 
-    let botType = 'uniform';
-    function setBotType(type) {
-      botType = type;
-      document.querySelectorAll('#bot-type-btns .tab-btn').forEach((b) => {
-        b.classList.toggle('active', b.dataset.botType === type);
-      });
-    }
-
     async function addPlayers() {
       const count = sliderToInt('add-n');
-      const bias = document.getElementById('add-bias').value;
+      const [bot_type, bias] = document.getElementById('add-bias').value.split(':');
       const order_freq = getFreq();
       if (count > 0) {
-        const res = await postAction('/api/add_players', { count, bias, order_freq, bot_type: botType });
+        const res = await postAction('/api/add_players', { count, bias, order_freq, bot_type });
         document.getElementById('ord-msg').textContent = res.message || '';
         refresh();
       }
@@ -1338,7 +1337,6 @@
       document.getElementById('add-bias').disabled = !canAddBots;
       document.getElementById('add-freq').disabled = !canAddBots;
       document.getElementById('add-freq-rand').disabled = !canAddBots;
-      document.querySelectorAll('#bot-type-btns .tab-btn').forEach((b) => { b.disabled = !canAddBots; });
       const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
       const humanCount = data.human_count ?? 0;
       document.getElementById('players-heading').textContent =

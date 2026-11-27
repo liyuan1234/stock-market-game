@@ -27,7 +27,7 @@ from db import (
     record_order,
     save_user_state,
 )
-from bots import create_bot
+from bots import create_bot, update_prices
 from main import CFG, Player, exchange, stock
 
 _SIM_CFG = CFG.get("simulation", {})
@@ -317,6 +317,8 @@ class LiveSimulation:
             target_t = self.t + dt * self.speed
             if self.duration is not None:
                 target_t = min(self.duration, target_t)
+
+            update_prices(self.players, self.market, self.stock)
 
             while self._heap and self._heap[0][0] <= target_t:
                 ev_t, _, p = heapq.heappop(self._heap)
@@ -715,13 +717,7 @@ class LiveSimulation:
             + _BOT_CFG.get("initial_shares", 50) * CFG.get("stock", {}).get("initial_price", 100.0)
         )
         for p in self.players:
-            stype = p.strategy["type"]
-            if stype == "buy_below":
-                breakdown["bull"] += 1
-            elif stype == "sell_above":
-                breakdown["bear"] += 1
-            else:
-                breakdown["both"] += 1
+            breakdown[p.bias] += 1
             qty = p.get_qty(self.stock)
             val = round(p.cash + qty * price, 2)
             leaderboard_raw.append({
@@ -729,9 +725,9 @@ class LiveSimulation:
                 "id": p.id,
                 "is_bot": True,
                 "is_online": False,
-                "strategy": stype,
-                "model": p.strategy.get("model"),
-                "target": p.strategy["target_price"],
+                "strategy": p.bias,
+                "model": p.strategy,
+                "target": p.target_price,
                 "order_freq": round(p.order_freq, 3),
                 "cash": round(p.cash, 2),
                 "qty": qty,
@@ -1216,7 +1212,7 @@ def inject_stock(req: InjectStockReq, uid: int = Depends(require_user_id)):
 @app.post("/api/reset_players")
 def reset_players(uid: int = Depends(require_user_id)):
     total = sim.reset_players()
-    return {"ok": True, "total_players": total, "message": f"Reset to {total} players."}
+    return {"ok": True, "total_players": total, "message": f"Reset to {total} bots."}
 
 
 @app.websocket("/ws")

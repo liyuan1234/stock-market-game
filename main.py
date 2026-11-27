@@ -644,7 +644,7 @@ def run_simulation(n=None, duration=600.0):
     market = exchange()
     s = stock()
     s.numberOfStock = max(s.numberOfStock, n * init_shares)
-    from bots import create_bot  # local import: bots.py imports from this module
+    from bots import create_bot, update_prices  # local import: bots.py imports from this module
 
     players = [
         create_bot("uniform", id=i + 1, curr_price=s.price, stock=[{"name": s.name, "qty": init_shares}])
@@ -661,10 +661,15 @@ def run_simulation(n=None, duration=600.0):
         heapq.heappush(heap, (ev_t, seq, p))
         seq += 1
 
+    tick_dt = _SIM_CFG.get("tick_dt", 0.05)
+    next_tick = 0.0
     while heap:
         t, _, p = heapq.heappop(heap)
         if t > duration:
             break
+        while next_tick <= t:
+            update_prices(players, market, s)
+            next_tick += tick_dt
         p.act(market, s, t=t)
         next_t = t + random.expovariate(p.order_freq * 2)
         heapq.heappush(heap, (next_t, seq, p))
