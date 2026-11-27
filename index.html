@@ -455,7 +455,7 @@
             <span>Order Freq <label style="cursor:pointer;"><input type="checkbox" id="add-freq-rand" checked onchange="syncFreq()" style="vertical-align:middle;margin:0 2px 0 6px;" />Rnd</label></span>
             <strong id="add-freq-val">Random</strong>
           </div>
-          <input type="range" id="add-freq" min="0" max="7" step="0.01" value="6" list="add-freq-marks" oninput="onFreqSlide()" />
+          <input type="range" id="add-freq" min="0" max="4" step="0.01" value="3" list="add-freq-marks" oninput="onFreqSlide()" />
           <div class="slider-marks" id="add-freq-labels"></div>
           <datalist id="add-freq-marks"></datalist>
         </div>
@@ -846,7 +846,7 @@
       refresh();
     }
 
-    const FREQ_TICKS = [0, 0.001, 0.01, 0.1, 0.2, 0.5, 1, 2];
+    const FREQ_TICKS = [0, 0.01, 0.1, 0.25, 1];
 
     // Piecewise-linear between ticks so each tick gets equal slider width.
     function freqFromSlider() {

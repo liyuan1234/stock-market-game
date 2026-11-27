@@ -1039,7 +1039,7 @@ class DepositReq(BaseModel):
 class AddPlayersReq(BaseModel):
     count: int = 10
     bias: str = "random"
-    order_freq: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    order_freq: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class CancelReq(BaseModel):
