@@ -635,58 +635,6 @@ class Player:
         )
         return True, "Sell limit order submitted.", order
 
-    def act(self, market, s, t=0.0):
-        """Submit an order around reference price according to the bot's strategy."""
-        market.prune_bot_orders(self, now_t=t)
-
-        qty = self.get_qty(s)
-        # Automatic margin cover if deeply short and approaching maintenance threshold
-        if qty < 0 and self.equity(s) < abs(qty) * s.price * SHORT_MAINT_MARGIN_RATE:
-            cover_qty = max(1, min(abs(qty), _BOT_CFG.get("max_order_qty", 10)))
-            market.submitMarketOrder(s, "buy", cover_qty, player=self, t=t)
-            return
-
-        ref = market.reference_price(s)
-        target = self.strategy["target_price"]
-        stype = self.strategy["type"]
-        p_spread = _BOT_CFG.get("price_spread", 2.0)
-
-        # Gentle target adaptation prevents permanent market freeze after extreme price shocks
-        if abs(ref - target) > p_spread * 2.5:
-            target = round(max(0.05, target + 0.02 * (ref - target)), 2)
-            self.strategy["target_price"] = target
-
-        amount = random.randint(
-            _BOT_CFG.get("min_order_qty", 1),
-            _BOT_CFG.get("max_order_qty", 10),
-        )
-
-        if stype == "buy_below":
-            if ref <= target:
-                price = round(max(0.01, ref + random.uniform(-p_spread * 0.6, p_spread)), 2)
-                self.buy(market, s, price, amount, t=t)
-            elif random.random() < 0.15:
-                # Passive value bid near target keeps bid book alive
-                bid_anchor = round(max(0.01, (ref + target) * 0.5 + random.uniform(-p_spread, 0)), 2)
-                self.buy(market, s, bid_anchor, amount, t=t)
-        elif stype == "sell_above":
-            if ref >= target:
-                price = round(max(0.01, ref + random.uniform(-p_spread, p_spread * 0.6)), 2)
-                self.sell(market, s, price, amount, t=t)
-            elif random.random() < 0.15:
-                ask_anchor = round(max(0.01, (ref + target) * 0.5 + random.uniform(0, p_spread)), 2)
-                self.sell(market, s, ask_anchor, amount, t=t)
-        else:
-            # buy_sell: two-sided market maker skewed by fundamental target
-            diff = target - ref
-            buy_prob = max(0.15, min(0.85, 0.5 + diff / max(p_spread * 4.0, 1.0)))
-            if random.random() < buy_prob:
-                price = round(max(0.01, ref + random.uniform(-p_spread * 0.75, p_spread * 0.75)), 2)
-                self.buy(market, s, price, amount, t=t)
-            else:
-                price = round(max(0.01, ref + random.uniform(-p_spread * 0.75, p_spread * 0.75)), 2)
-                self.sell(market, s, price, amount, t=t)
-
 
 def run_simulation(n=None, duration=600.0):
     """Run one AAPL market simulation and return (history, final_price, tx_count)."""
@@ -696,7 +644,12 @@ def run_simulation(n=None, duration=600.0):
     market = exchange()
     s = stock()
     s.numberOfStock = max(s.numberOfStock, n * init_shares)
-    players = [Player(id=i + 1, stock=[{"name": s.name, "qty": init_shares}], is_bot=True) for i in range(n)]
+    from bots import create_bot  # local import: bots.py imports from this module
+
+    players = [
+        create_bot("uniform", id=i + 1, curr_price=s.price, stock=[{"name": s.name, "qty": init_shares}])
+        for i in range(n)
+    ]
 
     market.history[s.name] = [(0.0, s.price)]
     heap = []

@@ -10,7 +10,7 @@ import random
 import secrets
 import threading
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -27,6 +27,7 @@ from db import (
     record_order,
     save_user_state,
 )
+from bots import create_bot
 from main import CFG, Player, exchange, stock
 
 _SIM_CFG = CFG.get("simulation", {})
@@ -234,7 +235,12 @@ class LiveSimulation:
             )
             self.stock = stock()
             self.players = [
-                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": bot_shares}], is_bot=True)
+                create_bot(
+                    "uniform",
+                    id=i + 1,
+                    curr_price=self.stock.price,
+                    stock=[{"name": self.stock.name, "qty": bot_shares}],
+                )
                 for i in range(self.n)
             ]
             self._heap = []
@@ -550,7 +556,7 @@ class LiveSimulation:
             return True, f"Cancelled order #{order_id}."
         return False, "Order not found."
 
-    def add_players(self, count=10, bias="random", order_freq=None):
+    def add_players(self, count=10, bias="random", order_freq=None, bot_type="uniform"):
         with self.lock:
             if not _PLAYER_CFG.get("allow_adding_bots", True):
                 return False, self.n, "Adding bots is disabled in config."
@@ -569,27 +575,13 @@ class LiveSimulation:
             curr = self.stock.price
             bot_shares = _BOT_CFG.get("initial_shares", 50)
             for _ in range(count):
-                if bias == "bull":
-                    strategy = {
-                        "target_price": round(curr + random.uniform(2.0, 10.0), 2),
-                        "type": "buy_below",
-                    }
-                elif bias == "bear":
-                    strategy = {
-                        "target_price": round(max(0.01, curr - random.uniform(2.0, 10.0)), 2),
-                        "type": "sell_above",
-                    }
-                else:
-                    strategy = {
-                        "target_price": round(max(0.01, curr + random.uniform(-5.0, 5.0)), 2),
-                        "type": random.choice(["buy_below", "sell_above", "buy_sell"]),
-                    }
-                p = Player(
+                p = create_bot(
+                    bot_type,
                     id=self._next_bot_id,
-                    stock=[{"name": self.stock.name, "qty": bot_shares}],
-                    strategy=strategy,
+                    curr_price=curr,
+                    bias=bias,
                     order_freq=order_freq,
-                    is_bot=True,
+                    stock=[{"name": self.stock.name, "qty": bot_shares}],
                 )
                 self._next_bot_id += 1
                 self.players.append(p)
@@ -599,7 +591,7 @@ class LiveSimulation:
                 self.stock.numberOfStock += (count - max(0, overflow)) * bot_shares
             self.n = len(self.players)
             self._state_version += 1
-            return True, self.n, f"Added {count} {bias} players."
+            return True, self.n, f"Added {count} {bias} {bot_type} bots."
 
     def inject_cash(self, amount):
         with self.lock:
@@ -738,6 +730,7 @@ class LiveSimulation:
                 "is_bot": True,
                 "is_online": False,
                 "strategy": stype,
+                "model": p.strategy.get("model"),
                 "target": p.strategy["target_price"],
                 "order_freq": round(p.order_freq, 3),
                 "cash": round(p.cash, 2),
@@ -763,6 +756,7 @@ class LiveSimulation:
                 "is_bot": False,
                 "is_online": is_online,
                 "strategy": "manual",
+                "model": None,
                 "target": None,
                 "order_freq": None,
                 "cash": u_cash,
@@ -895,6 +889,7 @@ class LiveSimulation:
                     "is_bot": r["is_bot"],
                     "is_online": r["is_online"],
                     "strategy": r["strategy"],
+                    "model": r["model"],
                     "target": r["target"],
                     "order_freq": r["order_freq"],
                     "cash": r["cash"],
@@ -1038,7 +1033,8 @@ class DepositReq(BaseModel):
 
 class AddPlayersReq(BaseModel):
     count: int = 10
-    bias: str = "random"
+    bias: Literal["random", "bull", "bear"] = "random"
+    bot_type: Literal["uniform", "normal", "follow", "history_avg", "momentum"] = "uniform"
     order_freq: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
@@ -1192,7 +1188,7 @@ def deposit(req: DepositReq, uid: int = Depends(require_user_id)):
 
 @app.post("/api/add_players")
 def add_players(req: AddPlayersReq, uid: int = Depends(require_user_id)):
-    ok, total, msg = sim.add_players(req.count, bias=req.bias, order_freq=req.order_freq)
+    ok, total, msg = sim.add_players(req.count, bias=req.bias, order_freq=req.order_freq, bot_type=req.bot_type)
     return JSONResponse(
         {"ok": ok, "total_players": total, "message": msg},
         status_code=200 if ok else 403,

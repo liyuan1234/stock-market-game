@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY config.json db.py main.py dashboard.py index.html login.html ./
+COPY config.json db.py main.py bots.py dashboard.py index.html login.html ./
 
 EXPOSE 8080
 

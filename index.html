@@ -464,6 +464,21 @@
           <option value="bull">Buyers (Bull)</option>
           <option value="bear">Sellers (Bear)</option>
         </select>
+        <div class="slider-group">
+          <div class="slider-top"><span>Bot Type</span></div>
+          <div class="tabs" id="bot-type-btns">
+            <button class="tab-btn active" data-bot-type="uniform" onclick="setBotType('uniform')"
+              title="Fixed target, uniform around the current price">Uniform</button>
+            <button class="tab-btn" data-bot-type="normal" onclick="setBotType('normal')"
+              title="Fixed target, normally distributed around the current price">Normal</button>
+            <button class="tab-btn" data-bot-type="follow" onclick="setBotType('follow')"
+              title="Target follows the current price (moving average)">Follow</button>
+            <button class="tab-btn" data-bot-type="history_avg" onclick="setBotType('history_avg')"
+              title="Target is the average of historical prices over a 30s–5m window">Hist Avg</button>
+            <button class="tab-btn" data-bot-type="momentum" onclick="setBotType('momentum')"
+              title="Target extrapolates the recent trend in past prices">Momentum</button>
+          </div>
+        </div>
         <button onclick="addPlayers()">+ Players</button>
         <button onclick="resetPlayers()">Reset Players</button>
         <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
@@ -893,12 +908,21 @@
       syncFreq();
     })();
 
+    let botType = 'uniform';
+    function setBotType(type) {
+      botType = type;
+      document.querySelectorAll('#bot-type-btns .tab-btn').forEach((b) => {
+        b.classList.toggle('active', b.dataset.botType === type);
+      });
+    }
+
     async function addPlayers() {
       const count = sliderToInt('add-n');
       const bias = document.getElementById('add-bias').value;
       const order_freq = getFreq();
       if (count > 0) {
-        await postAction('/api/add_players', { count, bias, order_freq });
+        const res = await postAction('/api/add_players', { count, bias, order_freq, bot_type: botType });
+        document.getElementById('ord-msg').textContent = res.message || '';
         refresh();
       }
     }
@@ -1314,6 +1338,7 @@
       document.getElementById('add-bias').disabled = !canAddBots;
       document.getElementById('add-freq').disabled = !canAddBots;
       document.getElementById('add-freq-rand').disabled = !canAddBots;
+      document.querySelectorAll('#bot-type-btns .tab-btn').forEach((b) => { b.disabled = !canAddBots; });
       const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
       const humanCount = data.human_count ?? 0;
       document.getElementById('players-heading').textContent =
@@ -1379,7 +1404,7 @@
           const pl = Number(p.pnl || 0);
           const plCls = pl >= 0 ? 'bid' : 'ask';
           const plStr = `${pl >= 0 ? '+' : '-'}$${Math.abs(pl).toFixed(2)}`;
-          return `<tr${rowStyle}><td>${name}</td><td>${escHtml(p.strategy)}</td><td>${targetStr}</td><td>${freqStr}</td><td>${p.cash.toFixed(2)}</td><td>${Number(p.qty)}</td><td>${p.value.toFixed(2)}</td><td class="${plCls}">${plStr}</td></tr>`;
+          return `<tr${rowStyle}><td>${name}</td><td>${escHtml(p.model ? `${p.strategy} · ${p.model}` : p.strategy)}</td><td>${targetStr}</td><td>${freqStr}</td><td>${p.cash.toFixed(2)}</td><td>${Number(p.qty)}</td><td>${p.value.toFixed(2)}</td><td class="${plCls}">${plStr}</td></tr>`;
         })
         .join(''));
     }

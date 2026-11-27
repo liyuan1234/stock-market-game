@@ -1,4 +1,5 @@
 import contextlib
+import random
 import sqlite3
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from fastapi.testclient import TestClient
 
 import db
 import dashboard
+import bots
+from bots import BOT_TYPES, create_bot
 from main import Player, exchange, run_simulation, stock
 
 
@@ -326,6 +329,75 @@ class TestDashboardSessionAndPersistence(unittest.TestCase):
         # Fills at the same price are combined into a single row per distinct price
         prices = [f["fill_price"] for f in tx2["fills"]]
         self.assertEqual(len(prices), len(set(prices)))
+
+
+class TestBots(unittest.TestCase):
+    def setUp(self):
+        random.seed(0)
+        self.market = exchange()
+        self.s = stock(name="AAPL", price=100.0, numberOfStock=1000)
+        self.market.history["AAPL"] = [(0.0, 100.0)]
+
+    def test_create_bot_types_and_bias(self):
+        for bt in BOT_TYPES:
+            bull = create_bot(bt, id=1, curr_price=100.0, bias="bull")
+            if bull.strategy["model"] == bt:  # skip the 1% random fallback
+                self.assertEqual(bull.strategy["type"], "buy_below")
+                self.assertGreater(bull.strategy["target_price"], 100.0)
+            bear = create_bot(bt, id=2, curr_price=100.0, bias="bear")
+            if bear.strategy["model"] == bt:
+                self.assertEqual(bear.strategy["type"], "sell_above")
+                self.assertLess(bear.strategy["target_price"], 100.0)
+        with self.assertRaises(ValueError):
+            create_bot("nope", id=1, curr_price=100.0)
+
+    def test_biased_bots_have_one_percent_random_uniform(self):
+        n = 20000
+        fallback = sum(
+            create_bot("momentum", id=i, curr_price=100.0, bias="bull").strategy["model"] == "uniform"
+            for i in range(n)
+        )
+        self.assertAlmostEqual(fallback / n, bots.RANDOM_FALLBACK_PROB, delta=0.004)
+
+    def test_updating_bots_move_target_with_prices(self):
+        self.market.history["AAPL"] = [(float(t), 100.0 + t) for t in range(0, 61)]  # 100 -> 160
+        ref, t = 160.0, 60.0
+        follow = create_bot("follow", id=1, curr_price=100.0)
+        hist = create_bot("history_avg", id=2, curr_price=100.0)
+        mom = create_bot("momentum", id=3, curr_price=100.0)
+        for b in (follow, hist, mom):
+            b.offset = 0.0
+            b.update_target(self.market, self.s, ref, t)
+        self.assertGreater(follow.strategy["target_price"], 100.0)
+        expected_avg = bots.mean_price_since(self.market.history["AAPL"], t - hist.window)
+        self.assertAlmostEqual(hist.strategy["target_price"], round(expected_avg, 2), places=2)
+        # Rising prices: momentum target sits above the recent average, by at most the cap.
+        avg = bots.mean_price_since(self.market.history["AAPL"], t - mom.lookback)
+        self.assertGreater(mom.strategy["target_price"], avg)
+        self.assertLessEqual(mom.strategy["target_price"] - avg, 2.0 * bots.MOMENTUM_CAP_SPREADS + 0.01)
+
+    def test_fixed_bots_keep_target(self):
+        for bt in ("uniform", "normal"):
+            b = create_bot(bt, id=1, curr_price=100.0)
+            before = b.strategy["target_price"]
+            b.update_target(self.market, self.s, before + 0.5, 10.0)
+            self.assertEqual(b.strategy["target_price"], before)
+
+    def test_bull_offset_decays(self):
+        b = create_bot("follow", id=1, curr_price=100.0, bias="bull")
+        while b.strategy["model"] != "follow":
+            b = create_bot("follow", id=1, curr_price=100.0, bias="bull")
+        start = b.current_offset(0.0)
+        later = b.current_offset(bots.OFFSET_DECAY_TAU)
+        self.assertAlmostEqual(later, start / 2.718281828, places=3)
+
+    def test_add_players_api_with_bot_type(self):
+        sim = dashboard.LiveSimulation()
+        ok, _, msg = sim.add_players(5, bias="bear", bot_type="history_avg")
+        self.assertTrue(ok)
+        self.assertIn("history_avg", msg)
+        for _ in range(40):
+            sim.step()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
         "min_order_qty": 1,
         "max_order_qty": 10,
         "target_price_range": 5.0,
+        "target_price_std": 3.0,
         "allow_short_selling": true
     },
     "player": {
