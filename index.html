@@ -28,6 +28,7 @@
       background: var(--bg);
       color: var(--text);
       padding: 16px;
+      font-variant-numeric: tabular-nums;
     }
 
     .top-row {
@@ -118,7 +119,7 @@
 
     .grid {
       display: grid;
-      grid-template-columns: 2fr 1fr;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
       gap: 16px;
       margin-bottom: 16px;
     }
@@ -324,6 +325,80 @@
       height: 240px;
     }
 
+    #bot-dialog {
+      margin: auto;
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 18px;
+      width: 340px;
+    }
+
+    #bot-dialog::backdrop {
+      background: rgba(0, 0, 0, 0.55);
+    }
+
+    .bot-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .bot-form h2 {
+      font-size: 14px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .bot-form .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+      width: 100%;
+    }
+
+    .bot-form .field.disabled {
+      opacity: 0.45;
+    }
+
+    .bot-form-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    #chart {
+      cursor: grab;
+      touch-action: none;
+    }
+
+    #chart.dragging {
+      cursor: grabbing;
+    }
+
+    /* Order book: fixed columns and row height so it never resizes. */
+    .book-table {
+      table-layout: fixed;
+      font-family: monospace;
+    }
+
+    .book-table td,
+    .book-table th {
+      height: 24px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .book-table button {
+      padding: 1px 6px;
+      font-size: 11px;
+    }
+
     .tx-scroll {
       max-height: 360px;
       overflow: auto;
@@ -416,6 +491,71 @@
 </head>
 
 <body>
+
+  <dialog id="bot-dialog">
+    <form method="dialog" class="bot-form" onsubmit="event.preventDefault(); addPlayers();">
+      <h2>Create Bots</h2>
+      <label class="field">
+        <span>Type</span>
+        <select id="add-type" onchange="syncBotDialog()">
+          <option value="uniform" selected title="Fixed target, uniform around the centre price">Uniform</option>
+          <option value="normal" title="Fixed target, normally distributed around the centre price">Normal</option>
+          <option value="follow" title="Target follows the current price">Follow Price</option>
+          <option value="history_avg" title="Target is the average of recent traded prices">Historical Avg</option>
+          <option value="momentum" title="Target extrapolates the recent trend in prices">Momentum</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Bias</span>
+        <select id="add-bias">
+          <option value="random" selected>Random</option>
+          <option value="bull">Buyers (Bull)</option>
+          <option value="bear">Sellers (Bear)</option>
+        </select>
+      </label>
+        <div class="slider-group field">
+          <div class="slider-top"><span>Bots</span><strong id="add-n-val">10</strong></div>
+          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="add-n-marks"
+            oninput="syncSlider('add-n')" />
+          <div class="slider-marks" id="add-n-labels">
+            <span onclick="setSliderVal('add-n', 1)">1</span>
+            <span onclick="setSliderVal('add-n', 10)">10</span>
+            <span onclick="setSliderVal('add-n', 100)">100</span>
+            <span onclick="setSliderVal('add-n', 500)">500</span>
+          </div>
+          <datalist id="add-n-marks"></datalist>
+        </div>
+        <div class="slider-group field" title="Bot order_freq: average orders per sim second = 2 × order_freq (0 = never trades). Random = 0.05–1 per bot.">
+          <div class="slider-top">
+            <span>Order Freq <label style="cursor:pointer;"><input type="checkbox" id="add-freq-rand" checked onchange="syncFreq()" style="vertical-align:middle;margin:0 2px 0 6px;" />Rnd</label></span>
+            <strong id="add-freq-val">Random</strong>
+          </div>
+          <input type="range" id="add-freq" min="0" max="4" step="0.01" value="3" list="add-freq-marks" oninput="onFreqSlide()" />
+          <div class="slider-marks" id="add-freq-labels"></div>
+          <datalist id="add-freq-marks"></datalist>
+        </div>
+        <div class="slider-group field" id="add-target-group"
+          title="Centre of the bots' target prices. Mkt = the current price. Only used by fixed-target types (Uniform, Normal).">
+          <div class="slider-top">
+            <span>Target Price <label style="cursor:pointer;"><input type="checkbox" id="add-target-mkt" checked onchange="syncBotDialog()" style="vertical-align:middle;margin:0 2px 0 6px;" />Mkt</label></span>
+            <strong id="add-target-val">Market</strong>
+          </div>
+          <input type="range" id="add-target" min="50" max="150" step="0.01" value="100" oninput="onTargetSlide()" />
+          <div class="slider-marks"><span id="add-target-min">50</span><span id="add-target-max">150</span></div>
+        </div>
+        <div class="slider-group field"
+          title="How spread out the bots' targets are: ± range for Uniform, standard deviation for Normal. Bull/bear bots sit above/below the centre by 2 + this spread.">
+          <div class="slider-top"><span>Variance (±$)</span><strong id="add-var-val">5.0</strong></div>
+          <input type="range" id="add-var" min="0" max="20" step="0.1" value="5" oninput="syncBotDialog()" />
+          <div class="slider-marks"><span>0</span><span>5</span><span>10</span><span>15</span><span>20</span></div>
+        </div>
+      <div class="bot-form-actions">
+        <button type="button" onclick="document.getElementById('bot-dialog').close()">Cancel</button>
+        <button type="submit" class="btn-buy">Create</button>
+      </div>
+      <div class="status-msg" id="bot-msg"></div>
+    </form>
+  </dialog>
   <div class="top-row">
     <div class="card ticker-card">
       <h1 id="symbol">AAPL</h1>
@@ -438,55 +578,7 @@
           <option value="5">5x</option>
           <option value="10">10x</option>
         </select>
-        <div class="slider-group">
-          <div class="slider-top"><span>Bots</span><strong id="add-n-val">10</strong></div>
-          <input type="range" id="add-n" min="0" max="3" step="0.01" value="1" list="add-n-marks"
-            oninput="syncSlider('add-n')" />
-          <div class="slider-marks" id="add-n-labels">
-            <span onclick="setSliderVal('add-n', 1)">1</span>
-            <span onclick="setSliderVal('add-n', 10)">10</span>
-            <span onclick="setSliderVal('add-n', 100)">100</span>
-            <span onclick="setSliderVal('add-n', 500)">500</span>
-          </div>
-          <datalist id="add-n-marks"></datalist>
-        </div>
-        <div class="slider-group" title="Bot order_freq: average orders per sim second = 2 × order_freq (0 = never trades). Random = 0.05–1 per bot.">
-          <div class="slider-top">
-            <span>Order Freq <label style="cursor:pointer;"><input type="checkbox" id="add-freq-rand" checked onchange="syncFreq()" style="vertical-align:middle;margin:0 2px 0 6px;" />Rnd</label></span>
-            <strong id="add-freq-val">Random</strong>
-          </div>
-          <input type="range" id="add-freq" min="0" max="4" step="0.01" value="3" list="add-freq-marks" oninput="onFreqSlide()" />
-          <div class="slider-marks" id="add-freq-labels"></div>
-          <datalist id="add-freq-marks"></datalist>
-        </div>
-        <select id="add-bias" title="Bot type and bias for new bots">
-          <optgroup label="Uniform">
-            <option value="uniform:random" selected title="Fixed target, uniform around the current price">Uniform · Random</option>
-            <option value="uniform:bull" title="Fixed target, uniform around the current price">Uniform · Buyers (Bull)</option>
-            <option value="uniform:bear" title="Fixed target, uniform around the current price">Uniform · Sellers (Bear)</option>
-          </optgroup>
-          <optgroup label="Normal">
-            <option value="normal:random" title="Fixed target, normally distributed around the current price">Normal · Random</option>
-            <option value="normal:bull" title="Fixed target, normally distributed around the current price">Normal · Buyers (Bull)</option>
-            <option value="normal:bear" title="Fixed target, normally distributed around the current price">Normal · Sellers (Bear)</option>
-          </optgroup>
-          <optgroup label="Follow Price">
-            <option value="follow:random" title="Target follows the current price (moving average)">Follow Price · Random</option>
-            <option value="follow:bull" title="Target follows the current price (moving average)">Follow Price · Buyers (Bull)</option>
-            <option value="follow:bear" title="Target follows the current price (moving average)">Follow Price · Sellers (Bear)</option>
-          </optgroup>
-          <optgroup label="Historical Avg">
-            <option value="history_avg:random" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Random</option>
-            <option value="history_avg:bull" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Buyers (Bull)</option>
-            <option value="history_avg:bear" title="Target is the average of historical prices over a 30s–5m window">Historical Avg · Sellers (Bear)</option>
-          </optgroup>
-          <optgroup label="Momentum">
-            <option value="momentum:random" title="Target extrapolates the recent trend in past prices">Momentum · Random</option>
-            <option value="momentum:bull" title="Target extrapolates the recent trend in past prices">Momentum · Buyers (Bull)</option>
-            <option value="momentum:bear" title="Target extrapolates the recent trend in past prices">Momentum · Sellers (Bear)</option>
-          </optgroup>
-        </select>
-        <button onclick="addPlayers()">+ Bots</button>
+        <button id="bots-open" onclick="openBotDialog()">+ Bots</button>
         <button onclick="resetPlayers()">Reset Bots</button>
         <input type="number" id="inject-amt" min="1" step="1000" value="100000" style="width:90px;cursor:text;" />
         <button onclick="injectCash()">+ $ All</button>
@@ -501,6 +593,8 @@
       <div class="chart-header">
         <h2 style="margin-bottom:0;">Price</h2>
         <div id="candle-tools" style="display:flex;gap:6px;align-items:center;">
+          <button class="tab-btn" id="chart-live" style="display:none;" onclick="lastData && setViewEnd(lastData.candles, Infinity)"
+            title="Jump back to the latest candles">Live ▶</button>
           <button class="tab-btn" id="ind-ma" onclick="toggleIndicator('ma')">MA (5/15)</button>
           <button class="tab-btn" id="ind-bb" onclick="toggleIndicator('bb')">BB (10)</button>
           <select id="interval-sel" onchange="setIntervalSec(this.value)">
@@ -538,7 +632,8 @@
         </div>
       </div>
       <div id="book-table-view">
-        <table>
+        <table class="book-table">
+          <colgroup><col /><col style="width:72px;" /><col style="width:64px;" /><col style="width:64px;" /></colgroup>
           <thead>
             <tr>
               <th>Side</th>
@@ -550,7 +645,8 @@
           <tbody id="asks-body"></tbody>
         </table>
         <div class="spread" id="mid-price">Last: $100.00</div>
-        <table>
+        <table class="book-table">
+          <colgroup><col /><col style="width:72px;" /><col style="width:64px;" /><col style="width:64px;" /></colgroup>
           <tbody id="bids-body"></tbody>
         </table>
       </div>
@@ -657,7 +753,34 @@
     let isRunning = true;
     let candleInterval = 60;
     let lastData = null;
-    let hoverIdx = -1;
+    let hoverIdx = -1;          // index into the visible candles
+    const BOOK_ROWS = 10;       // order book rows per side (matches the server's top 10)
+    const VIEW_CANDLES = 60;    // candles visible at once
+    let viewEnd = null;         // time of the rightmost visible candle; null = follow live
+    let lastSlotW = 1;          // px per candle in the last draw
+
+    // [start, end) of the candles currently on screen.
+    function visibleRange(all) {
+      const n = all.length;
+      let end = n;
+      if (viewEnd !== null) {
+        let i = n - 1;
+        while (i >= 0 && all[i].time > viewEnd) i--;
+        end = i + 1;
+        if (end >= n) viewEnd = null;
+      }
+      end = Math.max(end, Math.min(VIEW_CANDLES, n));
+      return [Math.max(0, end - VIEW_CANDLES), end];
+    }
+
+    // Move the view so it ends at candle index `end` (exclusive).
+    function setViewEnd(all, end) {
+      const n = all.length;
+      end = Math.max(Math.min(VIEW_CANDLES, n), Math.min(n, end));
+      viewEnd = end >= n ? null : all[end - 1].time;
+      document.getElementById('chart-live').style.display = viewEnd === null ? 'none' : '';
+      drawCandles(all);
+    }
     let smoothMinP = null;
     let smoothMaxP = null;
     let needsChartDraw = true;
@@ -747,6 +870,8 @@
     function setIntervalSec(val) {
       candleInterval = Number(val);
       hoverIdx = -1;
+      viewEnd = null;
+      document.getElementById('chart-live').style.display = 'none';
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ interval: candleInterval }));
       } else {
@@ -915,15 +1040,63 @@
       syncFreq();
     })();
 
+    const FIXED_TARGET_TYPES = ['uniform', 'normal'];
+
+    function openBotDialog() {
+      // Target slider spans ±50% around the current price.
+      const p = lastData ? lastData.price : 100;
+      const el = document.getElementById('add-target');
+      el.min = (p * 0.5).toFixed(2);
+      el.max = (p * 1.5).toFixed(2);
+      document.getElementById('add-target-min').textContent = Number(el.min).toFixed(0);
+      document.getElementById('add-target-max').textContent = Number(el.max).toFixed(0);
+      if (document.getElementById('add-target-mkt').checked) el.value = p.toFixed(2);
+      document.getElementById('bot-msg').textContent = '';
+      syncBotDialog();
+      document.getElementById('bot-dialog').showModal();
+    }
+
+    function onTargetSlide() {
+      document.getElementById('add-target-mkt').checked = false;
+      syncBotDialog();
+    }
+
+    function getTargetPrice() {
+      const fixed = FIXED_TARGET_TYPES.includes(document.getElementById('add-type').value);
+      if (!fixed || document.getElementById('add-target-mkt').checked) return null;
+      return Number(document.getElementById('add-target').value);
+    }
+
+    function syncBotDialog() {
+      const fixed = FIXED_TARGET_TYPES.includes(document.getElementById('add-type').value);
+      document.getElementById('add-target-group').classList.toggle('disabled', !fixed);
+      document.getElementById('add-target').disabled = !fixed;
+      document.getElementById('add-target-mkt').disabled = !fixed;
+      const t = getTargetPrice();
+      document.getElementById('add-target-val').textContent =
+        !fixed ? 'Follows price' : (t === null ? 'Market' : `$${t.toFixed(2)}`);
+      document.getElementById('add-var-val').textContent =
+        Number(document.getElementById('add-var').value).toFixed(1);
+    }
+
     async function addPlayers() {
       const count = sliderToInt('add-n');
-      const [bot_type, bias] = document.getElementById('add-bias').value.split(':');
-      const order_freq = getFreq();
-      if (count > 0) {
-        const res = await postAction('/api/add_players', { count, bias, order_freq, bot_type });
-        document.getElementById('ord-msg').textContent = res.message || '';
-        refresh();
+      if (count <= 0) return;
+      const res = await postAction('/api/add_players', {
+        count,
+        bot_type: document.getElementById('add-type').value,
+        bias: document.getElementById('add-bias').value,
+        order_freq: getFreq(),
+        target_price: getTargetPrice(),
+        variance: Number(document.getElementById('add-var').value),
+      });
+      document.getElementById('ord-msg').textContent = res.message || '';
+      if (res.ok === false) {
+        document.getElementById('bot-msg').textContent = res.message || 'Could not add bots.';
+        return;
       }
+      document.getElementById('bot-dialog').close();
+      refresh();
     }
 
     async function injectCash() {
@@ -956,7 +1129,7 @@
       refresh();
     }
 
-    function drawCandles(candles) {
+    function drawCandles(allCandles) {
       const canvas = document.getElementById('chart');
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
@@ -967,7 +1140,9 @@
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, w, h);
 
-      if (!candles || candles.length === 0) return;
+      if (!allCandles || allCandles.length === 0) return;
+      const [vStart, vEnd] = visibleRange(allCandles);
+      const candles = allCandles.slice(vStart, vEnd);
 
       const pad = { top: 12, right: 56, bottom: 24, left: 12 };
       const cw = w - pad.left - pad.right;
@@ -995,7 +1170,8 @@
         ctx.fillText(val.toFixed(2), w - pad.right + 6, y + 4);
       }
 
-      const slotW = cw / candles.length;
+      const slotW = cw / VIEW_CANDLES;
+      lastSlotW = slotW;
       const bodyW = Math.max(1, Math.min(24, slotW * 0.65));
 
       candles.forEach((c, i) => {
@@ -1023,7 +1199,7 @@
         ctx.fillStyle = bullish ? 'rgba(63,185,80,0.35)' : 'rgba(248,81,73,0.35)';
         ctx.fillRect(cx - bodyW / 2, volTop + volH - vh, bodyW, vh);
 
-        if (candles.length <= 12 || i % Math.ceil(candles.length / 8) === 0) {
+        if ((vStart + i) % Math.ceil(VIEW_CANDLES / 8) === 0) {
           ctx.fillStyle = '#8b949e';
           ctx.fillText(fmtTime(c.time), cx - 12, h - 6);
         }
@@ -1034,12 +1210,12 @@
       let ohlcText = `[${fmtTime(ac.time)}]  O: ${ac.open.toFixed(2)}   H: ${ac.high.toFixed(2)}   L: ${ac.low.toFixed(2)}   C: ${ac.close.toFixed(2)}   Vol: ${ac.volume}`;
 
       function calcSMA(period) {
-        return candles.map((_, i) => {
+        return allCandles.map((_, i) => {
           if (i + 1 < period) return null;
           let sum = 0;
-          for (let j = i - period + 1; j <= i; j++) sum += candles[j].close;
+          for (let j = i - period + 1; j <= i; j++) sum += allCandles[j].close;
           return sum / period;
-        });
+        }).slice(vStart, vEnd);
       }
 
       function drawLineOverlay(vals, color, dash = []) {
@@ -1076,7 +1252,7 @@
         candles.forEach((_, i) => {
           if (mid[i] === null) { upper.push(null); lower.push(null); return; }
           let sq = 0;
-          for (let j = i - period + 1; j <= i; j++) sq += (candles[j].close - mid[i]) ** 2;
+          for (let j = vStart + i - period + 1; j <= vStart + i; j++) sq += (allCandles[j].close - mid[i]) ** 2;
           const sd = Math.sqrt(sq / period);
           upper.push(mid[i] + 2 * sd);
           lower.push(mid[i] - 2 * sd);
@@ -1277,13 +1453,48 @@
       ctx.fillText(maxP.toFixed(1), w - pad.right - 30, h - 6);
     }
 
-    document.getElementById('chart').addEventListener('mousemove', (e) => {
+    const chartEl = document.getElementById('chart');
+    let drag = null;  // {x, end} while dragging
+
+    chartEl.addEventListener('mousedown', (e) => {
       if (!lastData || !lastData.candles.length) return;
+      drag = { x: e.clientX, end: visibleRange(lastData.candles)[1] };
+      chartEl.classList.add('dragging');
+    });
+
+    window.addEventListener('mouseup', () => {
+      drag = null;
+      chartEl.classList.remove('dragging');
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!drag || !lastData) return;
+      const shift = Math.round((e.clientX - drag.x) / lastSlotW);
+      setViewEnd(lastData.candles, drag.end - shift);
+    });
+
+    let wheelAccum = 0;
+    chartEl.addEventListener('wheel', (e) => {
+      if (!lastData || !lastData.candles.length) return;
+      e.preventDefault();
+      wheelAccum += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      const steps = Math.trunc(wheelAccum / 30);
+      if (!steps) return;
+      wheelAccum -= steps * 30;
+      setViewEnd(lastData.candles, visibleRange(lastData.candles)[1] + steps);
+    }, { passive: false });
+
+    chartEl.addEventListener('dblclick', () => {
+      if (lastData) setViewEnd(lastData.candles, Infinity);
+    });
+
+    chartEl.addEventListener('mousemove', (e) => {
+      if (!lastData || !lastData.candles.length || drag) return;
       const rect = e.target.getBoundingClientRect();
       const x = e.clientX - rect.left - 12;
-      const cw = rect.width - 12 - 56;
-      const idx = Math.floor((x / cw) * lastData.candles.length);
-      hoverIdx = idx >= 0 && idx < lastData.candles.length ? idx : -1;
+      const [vStart, vEnd] = visibleRange(lastData.candles);
+      const idx = Math.floor(x / lastSlotW);
+      hoverIdx = idx >= 0 && idx < vEnd - vStart ? idx : -1;
       drawCandles(lastData.candles);
     });
 
@@ -1333,10 +1544,7 @@
           `Shares: ${Number(data.total_shares).toLocaleString()} | MCap: $${Number(data.market_cap || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
       }
       const canAddBots = data.allow_adding_bots !== false;
-      document.getElementById('add-n').disabled = !canAddBots;
-      document.getElementById('add-bias').disabled = !canAddBots;
-      document.getElementById('add-freq').disabled = !canAddBots;
-      document.getElementById('add-freq-rand').disabled = !canAddBots;
+      document.getElementById('bots-open').disabled = !canAddBots;
       const pb = data.player_breakdown || { bull: 0, bear: 0, both: 0 };
       const humanCount = data.human_count ?? 0;
       document.getElementById('players-heading').textContent =
@@ -1362,18 +1570,17 @@
       document.getElementById('you-info').innerHTML =
         `${safeUser}: $${data.you.cash.toFixed(2)}${availInfo} | ${data.you.qty} shares | Total: $${data.you.value.toFixed(2)} | P&amp;L: <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPct).toFixed(2)}%)</span>`;
 
-      setHtml('asks-body', data.asks
-        .map(a => {
-          const tag = a.is_you ? ' (YOU)' : (a.trader ? ` (${escHtml(a.trader)})` : '');
-          return `<tr class="ask"><td>Ask${tag}</td><td>${a.price.toFixed(2)}</td><td>${a.amount}</td><td>${a.is_you ? `<button data-cancel-id="${Number(a.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`;
-        })
-        .join(''));
-      setHtml('bids-body', data.bids
-        .map(b => {
-          const tag = b.is_you ? ' (YOU)' : (b.trader ? ` (${escHtml(b.trader)})` : '');
-          return `<tr class="bid"><td>Bid${tag}</td><td>${b.price.toFixed(2)}</td><td>${b.amount}</td><td>${b.is_you ? `<button data-cancel-id="${Number(b.id)}" style="padding:2px 6px;font-size:11px;">Cancel</button>` : ''}</td></tr>`;
-        })
-        .join(''));
+      const bookRow = (o, cls, label) => {
+        const tag = o.is_you ? ' (YOU)' : (o.trader ? ` (${escHtml(o.trader)})` : '');
+        const cancel = o.is_you ? `<button data-cancel-id="${Number(o.id)}">Cancel</button>` : '';
+        return `<tr class="${cls}"><td>${label}${tag}</td><td>${o.price.toFixed(2)}</td><td>${o.amount}</td><td>${cancel}</td></tr>`;
+      };
+      const emptyRows = (n) => '<tr><td></td><td></td><td></td><td></td></tr>'.repeat(Math.max(0, n));
+      const asks = data.asks.slice(-BOOK_ROWS);
+      const bids = data.bids.slice(0, BOOK_ROWS);
+      // Asks fill from the bottom (best ask next to the spread), bids from the top.
+      setHtml('asks-body', emptyRows(BOOK_ROWS - asks.length) + asks.map(a => bookRow(a, 'ask', 'Ask')).join(''));
+      setHtml('bids-body', bids.map(b => bookRow(b, 'bid', 'Bid')).join('') + emptyRows(BOOK_ROWS - bids.length));
       setHtml('your-orders', data.your_orders.length
         ? 'Open Orders: ' + data.your_orders.map(o =>
           `${escHtml(o.side.toUpperCase())} ${Number(o.amount)}@${o.price.toFixed(2)} <button data-cancel-id="${Number(o.id)}" style="padding:1px 5px;font-size:11px;">Cancel</button>`

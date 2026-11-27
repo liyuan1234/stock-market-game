@@ -558,7 +558,8 @@ class LiveSimulation:
             return True, f"Cancelled order #{order_id}."
         return False, "Order not found."
 
-    def add_players(self, count=10, bias="random", order_freq=None, bot_type="uniform"):
+    def add_players(self, count=10, bias="random", order_freq=None, bot_type="uniform",
+                    target_price=None, variance=None):
         with self.lock:
             if not _PLAYER_CFG.get("allow_adding_bots", True):
                 return False, self.n, "Adding bots is disabled in config."
@@ -574,7 +575,7 @@ class LiveSimulation:
                 self.market.cancel_player_orders(evicted)
                 self.players = self.players[overflow:]
 
-            curr = self.stock.price
+            curr = self.stock.price if target_price is None else target_price
             bot_shares = _BOT_CFG.get("initial_shares", 50)
             for _ in range(count):
                 p = create_bot(
@@ -583,6 +584,7 @@ class LiveSimulation:
                     curr_price=curr,
                     bias=bias,
                     order_freq=order_freq,
+                    variance=variance,
                     stock=[{"name": self.stock.name, "qty": bot_shares}],
                 )
                 self._next_bot_id += 1
@@ -1032,6 +1034,8 @@ class AddPlayersReq(BaseModel):
     bias: Literal["random", "bull", "bear"] = "random"
     bot_type: Literal["uniform", "normal", "follow", "history_avg", "momentum"] = "uniform"
     order_freq: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    target_price: Optional[float] = Field(default=None, gt=0.0)  # None = current price
+    variance: Optional[float] = Field(default=None, ge=0.0, le=1000.0)  # None = config default
 
 
 class CancelReq(BaseModel):
@@ -1184,7 +1188,14 @@ def deposit(req: DepositReq, uid: int = Depends(require_user_id)):
 
 @app.post("/api/add_players")
 def add_players(req: AddPlayersReq, uid: int = Depends(require_user_id)):
-    ok, total, msg = sim.add_players(req.count, bias=req.bias, order_freq=req.order_freq, bot_type=req.bot_type)
+    ok, total, msg = sim.add_players(
+        req.count,
+        bias=req.bias,
+        order_freq=req.order_freq,
+        bot_type=req.bot_type,
+        target_price=req.target_price,
+        variance=req.variance,
+    )
     return JSONResponse(
         {"ok": ok, "total_players": total, "message": msg},
         status_code=200 if ok else 403,

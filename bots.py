@@ -31,8 +31,8 @@ BIASES = ("bull", "bear", "both")
 
 # Share of bull/bear bots that are created as a random uniform bot instead.
 RANDOM_FALLBACK_PROB = 0.01
-# Bull/bear bots start this far above/below the current price.
-BIAS_OFFSET_RANGE = (2.0, 10.0)
+# Bull/bear bots' targets start at least this far above/below the centre price.
+BIAS_MIN_OFFSET = 2.0
 # Updating bots' offset is multiplied by this on every update (every tick).
 OFFSET_DECAY = 0.998
 # Momentum targets lead the latest price by at most this much.
@@ -159,12 +159,17 @@ def create_bot(
     bias: str = "random",
     order_freq: float | None = None,
     stock: list[dict] | None = None,
+    variance: float | None = None,
 ) -> Bot:
     """Create a bot with the given strategy.
 
     bias "bull" / "bear" makes a buyer / seller targeting above / below the
     current price (1% of those come out as a random uniform bot instead);
     "random" picks any bias with a small target offset.
+
+    ``curr_price`` is the centre the targets are drawn around. ``variance`` sets
+    how spread out they are: the half-width for uniform draws, the std dev for
+    normal ones (defaults from config: target_price_range / target_price_std).
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"Unknown strategy {strategy!r}; expected one of {STRATEGIES}")
@@ -174,19 +179,22 @@ def create_bot(
     if bias != "random" and random.random() < RANDOM_FALLBACK_PROB:
         strategy, bias = "uniform", "random"
 
-    lo, hi = BIAS_OFFSET_RANGE
+    if variance is None:
+        if strategy == "normal":
+            variance = _BOT_CFG.get("target_price_std", 3.0)
+        else:
+            variance = _BOT_CFG.get("target_price_range", 5.0)
+    if strategy == "normal":
+        sample = random.gauss(0.0, variance)
+    else:
+        sample = random.uniform(-variance, variance)
+
     if bias == "random":
         bias = random.choice(BIASES)
-        if strategy == "normal":
-            offset = random.gauss(0.0, _BOT_CFG.get("target_price_std", 3.0))
-        else:
-            spread = _BOT_CFG.get("target_price_range", 5.0)
-            offset = random.uniform(-spread, spread)
+        offset = sample
     else:
-        if strategy == "normal":
-            magnitude = max(0.5, random.gauss((lo + hi) / 2, (hi - lo) / 4))
-        else:
-            magnitude = random.uniform(lo, hi)
+        # Bull/bear targets sit at least BIAS_MIN_OFFSET above/below the centre.
+        magnitude = BIAS_MIN_OFFSET + abs(sample)
         offset = magnitude if bias == "bull" else -magnitude
 
     kwargs = dict(id=id, stock=stock, order_freq=order_freq, strategy=strategy, bias=bias,
