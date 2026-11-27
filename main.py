@@ -489,7 +489,7 @@ class Player:
         id=None,
         cash=None,
         stock=None,
-        epsilon=None,
+        order_freq=None,
         strategy=None,
         is_bot: bool = True,
         allow_short_selling=None,
@@ -507,7 +507,7 @@ class Player:
             self.allow_short_selling = bool(cfg_src.get("allow_short_selling", True))
         else:
             self.allow_short_selling = bool(allow_short_selling)
-        self.epsilon = random.uniform(0, 1) if epsilon is None else epsilon
+        self.order_freq = random.uniform(0.05, 1) if order_freq is None else order_freq
         init_price = _STOCK_CFG.get("initial_price", 100.0)
         spread = _BOT_CFG.get("target_price_range", 5.0)
         self.strategy = (
@@ -702,7 +702,9 @@ def run_simulation(n=None, duration=600.0):
     heap = []
     seq = 0
     for p in players:
-        ev_t = random.expovariate(max(p.epsilon, 0.05) * 2)
+        if p.order_freq <= 0:
+            continue
+        ev_t = random.expovariate(p.order_freq * 2)
         heapq.heappush(heap, (ev_t, seq, p))
         seq += 1
 
@@ -711,7 +713,7 @@ def run_simulation(n=None, duration=600.0):
         if t > duration:
             break
         p.act(market, s, t=t)
-        next_t = t + random.expovariate(max(p.epsilon, 0.05) * 2)
+        next_t = t + random.expovariate(p.order_freq * 2)
         heapq.heappush(heap, (next_t, seq, p))
         seq += 1
 

@@ -1,0 +1,21 @@
+[project]
+name = "stock-market-game"
+version = "0.1.0"
+description = "Multiplayer stock market simulation with a live order-book dashboard"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -10,11 +10,12 @@ import random
 import secrets
 import threading
 import time
+from typing import Optional
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 from db import (
@@ -128,7 +129,9 @@ class LiveSimulation:
             flush_db_batch(user_updates, order_updates, fill_deltas, cancels)
 
     def _schedule_bot(self, bot: Player, base_t: float):
-        ev_t = base_t + random.expovariate(max(bot.epsilon, 0.05) * 2)
+        if bot.order_freq <= 0:
+            return  # order_freq 0: bot never places orders
+        ev_t = base_t + random.expovariate(bot.order_freq * 2)
         heapq.heappush(self._heap, (ev_t, self._heap_seq, bot))
         self._heap_seq += 1
 
@@ -288,17 +291,12 @@ class LiveSimulation:
             for b in old_bots:
                 b._active = False
 
-            self.n = self.initial_n
-            bot_shares = _BOT_CFG.get("initial_shares", 50)
-            self.players = [
-                Player(id=i + 1, stock=[{"name": self.stock.name, "qty": bot_shares}], is_bot=True)
-                for i in range(self.n)
-            ]
+            # Remove all bots; human players are untouched.
+            self.n = 0
+            self.players = []
             self._heap = []
             self._heap_seq = 0
-            for p in self.players:
-                self._schedule_bot(p, self.t)
-            self._next_bot_id = self.n + 1
+            self._next_bot_id = 1
             self._state_version += 1
             return self.n
 
@@ -552,7 +550,7 @@ class LiveSimulation:
             return True, f"Cancelled order #{order_id}."
         return False, "Order not found."
 
-    def add_players(self, count=10, bias="random"):
+    def add_players(self, count=10, bias="random", order_freq=None):
         with self.lock:
             if not _PLAYER_CFG.get("allow_adding_bots", True):
                 return False, self.n, "Adding bots is disabled in config."
@@ -590,6 +588,7 @@ class LiveSimulation:
                     id=self._next_bot_id,
                     stock=[{"name": self.stock.name, "qty": bot_shares}],
                     strategy=strategy,
+                    order_freq=order_freq,
                     is_bot=True,
                 )
                 self._next_bot_id += 1
@@ -717,12 +716,6 @@ class LiveSimulation:
             bid_levels[b["price"]] += b["amount"]
 
         txs = list(reversed(self.market.transactions[-15:]))
-        history = self.market.history.get(self.stock.name, [])
-        if len(history) > 500:
-            stride = max(1, (len(history) - 1) // 500)
-            sampled = history[:-1:stride]
-            history = sampled + [history[-1]]
-
         leaderboard_raw = []
         breakdown = {"bull": 0, "bear": 0, "both": 0}
         bot_init_basis = (
@@ -746,7 +739,7 @@ class LiveSimulation:
                 "is_online": False,
                 "strategy": stype,
                 "target": p.strategy["target_price"],
-                "eps": round(p.epsilon, 2),
+                "order_freq": round(p.order_freq, 3),
                 "cash": round(p.cash, 2),
                 "qty": qty,
                 "value": val,
@@ -771,7 +764,7 @@ class LiveSimulation:
                 "is_online": is_online,
                 "strategy": "manual",
                 "target": None,
-                "eps": None,
+                "order_freq": None,
                 "cash": u_cash,
                 "qty": u_qty,
                 "value": u_val,
@@ -792,7 +785,6 @@ class LiveSimulation:
             "all_asks": [[p, q] for p, q in list(ask_levels.items())[:200]],
             "all_bids": [[p, q] for p, q in list(bid_levels.items())[:200]],
             "txs": txs,
-            "history": history,
             "breakdown": breakdown,
             "leaderboard_raw": leaderboard_raw,
             "online_users": online_users,
@@ -904,7 +896,7 @@ class LiveSimulation:
                     "is_online": r["is_online"],
                     "strategy": r["strategy"],
                     "target": r["target"],
-                    "eps": r["eps"],
+                    "order_freq": r["order_freq"],
                     "cash": r["cash"],
                     "qty": r["qty"],
                     "value": r["value"],
@@ -929,7 +921,6 @@ class LiveSimulation:
                 "online_users": shared["online_users"],
                 "player_breakdown": shared["breakdown"],
                 "tx_count": self.market.total_tx_count,
-                "history": shared["history"],
                 "candles": candles,
                 "asks": list(reversed(asks)),
                 "bids": bids,
@@ -1048,6 +1039,7 @@ class DepositReq(BaseModel):
 class AddPlayersReq(BaseModel):
     count: int = 10
     bias: str = "random"
+    order_freq: Optional[float] = Field(default=None, ge=0.0, le=2.0)
 
 
 class CancelReq(BaseModel):
@@ -1200,7 +1192,7 @@ def deposit(req: DepositReq, uid: int = Depends(require_user_id)):
 
 @app.post("/api/add_players")
 def add_players(req: AddPlayersReq, uid: int = Depends(require_user_id)):
-    ok, total, msg = sim.add_players(req.count, bias=req.bias)
+    ok, total, msg = sim.add_players(req.count, bias=req.bias, order_freq=req.order_freq)
     return JSONResponse(
         {"ok": ok, "total_players": total, "message": msg},
         status_code=200 if ok else 403,
